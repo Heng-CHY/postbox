@@ -1,0 +1,28 @@
+[package]
+name = "remote-hub"
+version = "0.1.0"
+edition = "2021"
+description = "Self-hosted file delivery desk: turn any local file into a phone-friendly link with previews, downloads and a feedback inbox, driven by an agent over MCP"
+license = "MIT"
+readme = "README.md"
+keywords = ["mcp", "file-sharing", "mobile", "cloudflared", "ntfy"]
+categories = ["command-line-utilities", "web-programming::http-server"]
+
+[dependencies]
+anyhow = "1"
+axum = "0.8"
+calamine = "0.36.1"
+chrono = "0.4"
+clap = { version = "4", features = ["derive"] }
+mime_guess = "2"
+pulldown-cmark = "0.9"
+quick-xml = "0.42.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time"] }
+uuid = { version = "1", features = ["v4"] }
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+
+[profile.release]
+lto = true
+strip = true

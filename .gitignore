@@ -1,0 +1,11 @@
+/target
+/data
+/tools
+/demo/image1.png
+
+# editor / OS noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

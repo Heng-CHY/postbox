@@ -1,0 +1,8 @@
+--- a/src/app.rs
++++ b/src/app.rs
+@@ -10,6 +10,8 @@
+ fn main() {
+-    println!("old");
++    println!("new");
++    // 新增一行
+ }
