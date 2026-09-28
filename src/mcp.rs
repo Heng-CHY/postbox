@@ -1,5 +1,5 @@
 use std::io::{BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -11,7 +11,7 @@ fn tools_spec() -> Value {
     json!([
         {
             "name": "publish_file",
-            "description": "把电脑上的一个或多个文件发布到手机寄递台：生成随机链接并自动 ntfy 推送到用户手机。多文件自动打 zip。返回公网文件页 URL。",
+            "description": "把电脑上的一个或多个文件发布到手机寄递台：生成随机链接并自动 ntfy 推送到用户手机。多文件自动打 zip。返回公网文件页 URL。注意：可以读取任意本地路径（含符号链接），没有目录白名单，因此只应在可信的 agent 客户端里启用本工具。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -65,7 +65,7 @@ fn tools_spec() -> Value {
     ])
 }
 
-fn do_call(root: &PathBuf, req: &Value) -> Result<Value> {
+fn do_call(root: &Path, req: &Value) -> Result<Value> {
     let name = req["params"]["name"].as_str().unwrap_or("");
     let args = &req["params"]["arguments"];
     let cfg = store::load_config(root)?;
@@ -91,7 +91,14 @@ fn do_call(root: &PathBuf, req: &Value) -> Result<Value> {
                 Ok(meta) => {
                     let page = format!("{base}/b/{}", meta.token);
                     notify::push(&cfg, &format!("已发布: {}", meta.title), &page);
-                    (format!("已发布「{}」，共 {} 个文件\n手机页: {page}", meta.title, meta.files.len()), false)
+                    (
+                        format!(
+                            "已发布「{}」，共 {} 个文件\n手机页: {page}",
+                            meta.title,
+                            meta.files.len()
+                        ),
+                        false,
+                    )
                 }
                 Err(e) => (format!("发布失败: {e}"), true),
             }
@@ -101,6 +108,9 @@ fn do_call(root: &PathBuf, req: &Value) -> Result<Value> {
             let Some(content) = args["content"].as_str() else {
                 return Ok(tool_err("缺少 content 参数"));
             };
+            if content.len() > 8 * 1024 * 1024 {
+                return Ok(tool_err("内容超过 8 MB，请先存成文件再用 publish_file"));
+            }
             let tmp = root.join("tmp");
             std::fs::create_dir_all(&tmp)?;
             let safe = store::sanitize_name(filename);
@@ -202,7 +212,7 @@ pub fn run(root: PathBuf) -> Result<()> {
             "initialize" => Ok(json!({
                 "protocolVersion": req["params"]["protocolVersion"].as_str().unwrap_or("2025-06-18"),
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "remote-hub", "version": env!("CARGO_PKG_VERSION")}
+                "serverInfo": {"name": "postbox", "version": env!("CARGO_PKG_VERSION")}
             })),
             "ping" => Ok(json!({})),
             "tools/list" => Ok(json!({"tools": tools_spec()})),

@@ -1,0 +1,26 @@
+# 默认按内容自动判断文本，仓库内统一存 LF，检出也用 LF，
+# 免得 Windows 上 core.autocrlf 把 .rs 文件改成 CRLF 产生整文件 diff
+* text=auto eol=lf
+
+# 二进制：不要让 git 尝试换行转换或 diff
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.docx binary
+*.xlsx binary
+*.pdf binary
+*.exe binary
+*.zip binary
+
+# 这些文件对行尾/空白敏感，禁止任何自动清理
+Cargo.lock -text
+*.min.* -text
+
+# 审阅 diff 时按语言高亮
+*.rs diff=rust
+*.md diff=markdown
+
+# GitHub 网页上把 svg 当图片而不是文本
+*.svg linguist-image

@@ -81,7 +81,7 @@ table = (
     "<w:tbl><w:tr>"
     + cell("角色") + cell("实体") + cell("什么时候活着") + cell("干什么")
     + "</w:tr><w:tr>"
-    + cell("网页服务") + cell("remote-hub.exe up") + cell("开机常驻") + cell("存文件、渲染页面、收反馈")
+    + cell("网页服务") + cell("postbox.exe up") + cell("开机常驻") + cell("存文件、渲染页面、收反馈")
     + "</w:tr><w:tr>"
     + cell("公网隧道") + cell("cloudflared.exe") + cell("上一条的子进程") + cell("开一扇对外的门，发一个域名")
     + "</w:tr></w:tbl>"

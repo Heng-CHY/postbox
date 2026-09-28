@@ -17,7 +17,9 @@ pub fn push(cfg: &Config, title: &str, msg: &str) {
     let title_h = format!("Title: {title}");
     let priority_h = "Priority: high";
     let mut cmd = Command::new("curl");
-    cmd.args(["-s", "-m", "12", "-X", "POST", "-H", &title_h, "-H", priority_h]);
+    cmd.args([
+        "-s", "-m", "12", "-X", "POST", "-H", &title_h, "-H", priority_h,
+    ]);
     cmd.arg(&url).arg("--data-binary").arg(msg);
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())

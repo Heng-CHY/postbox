@@ -1,8 +1,15 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use axum::{
-    extract::{Path as APath, Query, State},
+    extract::{ConnectInfo, Path as APath, Query, Request, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
+    middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::get,
     Json, Router,
@@ -11,12 +18,73 @@ use serde_json::json;
 
 use crate::store::{self, BundleMeta, Config, Feedback};
 
+/// 同一个来源 IP 每分钟最多提交几条反馈
+const FB_PER_MIN: u32 = 6;
+/// 页内文本预览上限，超过只给下载
+const TEXT_PREVIEW_MAX: u64 = 512 * 1024;
+/// Word / 表格页内解析上限
+const OFFICE_PREVIEW_MAX: u64 = 20 * 1024 * 1024;
+
 pub struct AppState {
     pub root: PathBuf,
     pub cfg: Config,
+    /// 反馈限流：ip -> (窗口起点秒, 已提交条数)
+    pub fb_hits: Mutex<HashMap<String, (i64, u32)>>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+impl AppState {
+    /// 返回 true 表示还在配额内
+    fn allow_feedback(&self, ip: &str) -> bool {
+        let now = store::now_ms() / 1000;
+        let mut map = match self.fb_hits.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        if map.len() > 4096 {
+            map.clear();
+        }
+        let entry = map.entry(ip.to_string()).or_insert((now, 0));
+        if now - entry.0 >= 60 {
+            entry.0 = now;
+            entry.1 = 0;
+        }
+        entry.1 += 1;
+        entry.1 <= FB_PER_MIN
+    }
+
+    /// 配置是启动时的快照，但密钥和推送主题随时可能在电脑上被改掉，
+    /// 读文件很小，每次现读一次比让页面继续用旧值安全
+    fn current_cfg(&self) -> Config {
+        store::load_config(&self.root).unwrap_or_else(|_| self.cfg.clone())
+    }
+}
+
+/// 所有响应统一加的安全头。
+/// /raw 与 /m 直接吐出用户文件内容，可能被人做成 HTML/SVG 在隧道域里执行，
+/// 用 CSP sandbox 让它在顶层标签页里也跑不了脚本（被 <img> 引用时该头不生效，图片照常显示）。
+async fn security_headers(req: Request, next: Next) -> Response {
+    let path = req.uri().path();
+    let untrusted = path.starts_with("/raw/") || path.starts_with("/m/");
+    let mut res = next.run(req).await;
+    let h = res.headers_mut();
+    let mut insert = |name: &'static str, value: &'static str| {
+        h.insert(
+            header::HeaderName::from_static(name),
+            HeaderValue::from_static(value),
+        );
+    };
+    insert("x-content-type-options", "nosniff");
+    insert("referrer-policy", "same-origin");
+    if untrusted {
+        insert("content-security-policy", "sandbox; default-src 'none'");
+    } else {
+        insert("content-security-policy", "default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; frame-src 'self'; base-uri 'none'; form-action 'self'");
+        insert("x-frame-options", "SAMEORIGIN");
+    }
+    res
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Kind {
     Image,
     Markdown,
@@ -151,13 +219,31 @@ fn toast_js() -> &'static str {
     r#"<script>function toast(m){const t=document.getElementById('t');t.textContent=m;t.classList.add('on');setTimeout(()=>t.classList.remove('on'),2200)}</script>"#
 }
 
+fn cookie_key(headers: &HeaderMap) -> String {
+    headers
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|raw| {
+            raw.split(';')
+                .map(|s| s.trim())
+                .find_map(|kv| kv.strip_prefix("pb_key=").map(|v| v.to_string()))
+        })
+        .unwrap_or_default()
+}
+
 async fn home(
     State(st): State<Arc<AppState>>,
+    headers: HeaderMap,
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    let key = q.get("key").cloned().unwrap_or_default();
-    if key != st.cfg.access_key {
-        let body = r#"<h1>访问验证</h1><div class=card><form onsubmit="location='/?key='+encodeURIComponent(document.getElementById('k').value);return false"><input id=k type=password placeholder="访问密钥" style="width:100%;padding:10px;border:1px solid var(--line);border-radius:8px;font:inherit"><button class=btn style="margin-top:10px">进入</button></form></div>"#;
+    let key = q
+        .get("key")
+        .cloned()
+        .filter(|k| !k.is_empty())
+        .unwrap_or_else(|| cookie_key(&headers));
+    let cfg = st.current_cfg();
+    if cfg.access_key.is_empty() || key != cfg.access_key {
+        let body = r#"<h1>访问验证</h1><div class=card><form onsubmit="location='/?key='+encodeURIComponent(document.getElementById('k').value);return false"><input id=k type=password placeholder="访问密钥" style="width:100%;padding:10px;border:1px solid var(--line);border-radius:8px;font:inherit"><button class=btn style="margin-top:10px">进入</button></form><p class=muted>密钥在电脑上运行 <code>postbox token</code> 可以看到。</p></div>"#;
         return (StatusCode::OK, Html(page("访问验证", body))).into_response();
     }
     store::cleanup_expired(&st.root);
@@ -191,15 +277,26 @@ async fn home(
         ));
     }
     if fb_html.is_empty() {
-        fb_html = "<p class=muted>还没有反馈。你在任何文件页底部写的意见都会汇总到这里。</p>".into();
+        fb_html =
+            "<p class=muted>还没有反馈。你在文件包页面底部写的意见都会汇总到这里。</p>".into();
     }
     let body = format!(
         "<header class=top><h1>文件寄递台</h1><span class=badge>共 {} 项</span></header>\
 <div class=card><h2>已发布</h2><p class=hint>方向是 电脑 → 手机：这些是推送到你手机上的文件包。</p><ul class=files>{rows}</ul></div>\
-<div class=card><h2>手机回传的意见</h2><p class=hint>方向是 手机 → 电脑：你在文件页底部写的字会存回电脑的收件箱，只有我这边的 agent 读得到。</p>{fb_html}</div>",
+<div class=card><h2>手机回传的意见</h2><p class=hint>方向是 手机 → 电脑：你在文件包页面底部写的字会存回电脑的收件箱，只有我这边的 agent 读得到。</p>{fb_html}</div>",
         bundles.len()
     );
-    Html(page("文件寄递台", &body)).into_response()
+    let mut res = Html(page("文件寄递台", &body)).into_response();
+    // 通过 ?key= 进来时把密钥记到 Cookie，这样文件页的返回按钮不必再带上明文密钥
+    if q.contains_key("key") {
+        if let Ok(v) = HeaderValue::from_str(&format!(
+            "pb_key={}; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax",
+            cfg.access_key
+        )) {
+            res.headers_mut().append(header::SET_COOKIE, v);
+        }
+    }
+    res
 }
 
 /// 一条反馈的展示：正文 + 「谁给谁 · 关于哪个文件包 · 时间」。link=false 用于文件页内，包名不重复出现。
@@ -241,7 +338,10 @@ fn bundle_body(st: &Arc<AppState>, meta: &BundleMeta) -> String {
     let note = if meta.note.is_empty() {
         String::new()
     } else {
-        format!("<div class=card><h2>说明</h2><p>{}</p></div>", esc(&meta.note))
+        format!(
+            "<div class=card><h2>说明</h2><p>{}</p></div>",
+            esc(&meta.note)
+        )
     };
     let fbs = store::list_feedback(&st.root, 200);
     let mut fb_html = String::new();
@@ -258,8 +358,8 @@ fn bundle_body(st: &Arc<AppState>, meta: &BundleMeta) -> String {
         fb_html = "<p class=muted>还没有人写过。</p>".into();
     }
     format!(
-        r#"<header class=top><a class=back href="/?key={key}">← 全部文件</a><span class=badge>{}</span></header>
-<div class=card><h1>{}</h1><p class=muted>{} · {} 个文件{}</p>{note}{zip}</div>
+        r#"<header class=top><a class=back href="/">← 全部文件</a><span class=badge>{nfiles} 个文件</span></header>
+<div class=card><h1>{}</h1><p class=muted>{} 发布{}</p>{note}{zip}</div>
 <div class=card><h2>文件</h2><ul class=files>{files}</ul></div>
 <div class=card><h2>写反馈</h2><textarea id=fb placeholder="看完想说什么，直接写在这里。提交后会存回电脑，我下次开工就能读到。"></textarea>
 <button class=btn onclick=send()>提交反馈</button>
@@ -274,26 +374,21 @@ async function send(){{
     const q=document.createElement('div');q.className='fbq';q.textContent=text;
     const m=document.createElement('div');m.className='fbm';m.innerHTML='<span class=who>手机 → 电脑</span><span>刚刚</span>';
     d.append(q,m);document.getElementById('list').prepend(d);}}
-  else toast('提交失败 '+r.status);
+  else {{let msg='提交失败 '+r.status;try{{const j=await r.json();if(j.error)msg=j.error}}catch(e){{}}toast(msg);}}
 }}
 </script>{toast}"#,
-        esc(&store::fmt_time(meta.created_ms)),
         esc(&meta.title),
         esc(&store::fmt_time(meta.created_ms)),
-        meta.files.len(),
         meta.expires_ms
             .map(|e| format!(" · {} 过期", store::fmt_time(e)))
             .unwrap_or_default(),
         token = meta.token,
-        key = st.cfg.access_key,
         toast = toast_js(),
+        nfiles = meta.files.len(),
     )
 }
 
-async fn bundle_page(
-    State(st): State<Arc<AppState>>,
-    APath(token): APath<String>,
-) -> Response {
+async fn bundle_page(State(st): State<Arc<AppState>>, APath(token): APath<String>) -> Response {
     match store::load_meta(&st.root, &token) {
         Ok(meta) => Html(page(&meta.title, &bundle_body(&st, &meta))).into_response(),
         Err(_) => not_found(),
@@ -317,7 +412,13 @@ async fn bundle_zip(State(st): State<Arc<AppState>>, APath(token): APath<String>
         return not_found();
     }
     let path = st.root.join("bundles").join(&token).join("archive.zip");
-    file_response(&path, &format!("{}.zip", meta.title), true, "application/zip")
+    file_response(
+        &path,
+        &format!("{}.zip", meta.title),
+        true,
+        "application/zip",
+    )
+    .await
 }
 
 async fn serve_file(
@@ -329,20 +430,19 @@ async fn serve_file(
         Ok(m) => m,
         Err(_) => return not_found(),
     };
-    let Some(f) = meta.files.get(idx) else {
+    if meta.files.get(idx).is_none() {
         return not_found();
+    }
+    let path = match meta.file_path(&st.root, idx) {
+        Some(p) => p,
+        None => return not_found(),
     };
-    let path = st
-        .root
-        .join("bundles")
-        .join(&token)
-        .join("files")
-        .join(&f.stored);
-    let mime = mime_guess::from_path(&f.name)
+    let name = meta.files[idx].name.clone();
+    let mime = mime_guess::from_path(&name)
         .first()
         .map(|m| m.to_string())
         .unwrap_or_else(|| "application/octet-stream".into());
-    file_response(&path, &f.name, attachment, &mime)
+    file_response(&path, &name, attachment, &mime).await
 }
 
 async fn raw_file(st: State<Arc<AppState>>, p: APath<(String, usize)>) -> Response {
@@ -353,22 +453,42 @@ async fn dl_file(st: State<Arc<AppState>>, p: APath<(String, usize)>) -> Respons
     serve_file(st, p, true).await
 }
 
-fn file_response(path: &std::path::Path, name: &str, attachment: bool, mime: &str) -> Response {
-    let Ok(data) = std::fs::read(path) else {
+/// 流式发送文件：不把整个文件读进内存，几百 MB 的视频也不会把服务打爆
+async fn file_response(
+    path: &std::path::Path,
+    name: &str,
+    attachment: bool,
+    mime: &str,
+) -> Response {
+    let Ok(file) = tokio::fs::File::open(path).await else {
         return not_found();
     };
+    let len = file.metadata().await.map(|m| m.len()).unwrap_or(0);
     let disp = format!(
         "{}; filename*=UTF-8''{}",
         if attachment { "attachment" } else { "inline" },
         pct_encode(name)
     );
+    let body = axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(file));
     Response::builder()
         .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, HeaderValue::from_str(mime).unwrap())
-        .header(header::CONTENT_DISPOSITION, HeaderValue::from_str(&disp).unwrap())
+        .header(header::CONTENT_TYPE, mime)
+        .header(header::CONTENT_LENGTH, len)
+        .header(header::CONTENT_DISPOSITION, disp)
         .header(header::CACHE_CONTROL, "no-store")
-        .body(axum::body::Body::from(data))
-        .unwrap()
+        .body(body)
+        .unwrap_or_else(|_| internal_error())
+}
+
+fn internal_error() -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Html(page(
+            "出错了",
+            "<h1>服务内部错误</h1><p class=muted>请回到电脑端查看日志。</p>",
+        )),
+    )
+        .into_response()
 }
 
 async fn preview_page(
@@ -404,16 +524,16 @@ async fn preview_page(
             "{head}<video src=\"{raw_url}\" controls style=\"width:100%;border-radius:12px\"></video>"
         ),
         Kind::Markdown | Kind::Code | Kind::Text | Kind::Diff => {
-            let Ok(bytes) = std::fs::read(&fpath) else {
-                return not_found();
-            };
-            let too_big = bytes.len() > 512 * 1024;
-            if too_big {
+            // 先看大小再决定读不读，避免为了判断而把大文件整个吞进内存
+            if f.size > TEXT_PREVIEW_MAX {
                 format!(
                     "{head}<p class=muted>文件较大（{}），页内只适合下载后查看。</p>",
                     store::human_size(f.size)
                 )
             } else {
+                let Ok(bytes) = std::fs::read(&fpath) else {
+                    return not_found();
+                };
                 let text = String::from_utf8_lossy(&bytes);
                 match kind {
                     Kind::Markdown => format!(
@@ -426,7 +546,7 @@ async fn preview_page(
             }
         }
         Kind::Docx => {
-            if f.size > 20 * 1024 * 1024 {
+            if f.size > OFFICE_PREVIEW_MAX {
                 format!(
                     "{head}<p class=muted>文档较大（{}），建议下载后用手机上的 Office 或 WPS 打开。</p>",
                     store::human_size(f.size)
@@ -446,7 +566,7 @@ async fn preview_page(
             }
         }
         Kind::Sheet => {
-            if f.size > 20 * 1024 * 1024 {
+            if f.size > OFFICE_PREVIEW_MAX {
                 format!(
                     "{head}<p class=muted>表格较大（{}），建议下载后用表格应用打开。</p>",
                     store::human_size(f.size)
@@ -487,11 +607,14 @@ async fn preview_media(
     State(st): State<Arc<AppState>>,
     APath((token, idx, name)): APath<(String, usize, String)>,
 ) -> Response {
-    if store::load_meta(&st.root, &token).is_err()
+    if !store::valid_token(&token)
         || name.contains('/')
         || name.contains('\\')
         || name.contains("..")
     {
+        return not_found();
+    }
+    if store::load_meta(&st.root, &token).is_err() {
         return not_found();
     }
     let path = st
@@ -499,28 +622,39 @@ async fn preview_media(
         .join("tmp")
         .join(format!("m-{token}-{idx}"))
         .join(&name);
-    let Ok(data) = std::fs::read(&path) else {
+    let Ok(file) = tokio::fs::File::open(&path).await else {
         return not_found();
     };
+    let len = file.metadata().await.map(|m| m.len()).unwrap_or(0);
     let mime = mime_guess::from_path(&name)
         .first_or_octet_stream()
         .to_string();
-    Response::builder()
+    axum::response::Response::builder()
         .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, HeaderValue::from_str(&mime).unwrap())
+        .header(header::CONTENT_TYPE, mime)
+        .header(header::CONTENT_LENGTH, len)
         .header(header::CACHE_CONTROL, "no-store")
-        .body(axum::body::Body::from(data))
-        .unwrap()
+        .body(axum::body::Body::from_stream(
+            tokio_util::io::ReaderStream::new(file),
+        ))
+        .unwrap_or_else(|_| internal_error())
 }
 
+/// Markdown 渲染。原始 HTML 一律降级成正文文本，防止别人写的 .md 里夹带脚本
+/// 在我们的隧道域里执行（pulldown 自己会转义 Text 事件，所以这里不用先 esc）。
 fn render_markdown(md: &str) -> String {
-    use pulldown_cmark::{html, Options, Parser};
+    use pulldown_cmark::{html, Event, Options, Parser};
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_TABLES);
     opts.insert(Options::ENABLE_STRIKETHROUGH);
     opts.insert(Options::ENABLE_TASKLISTS);
     let mut out = String::new();
-    html::push_html(&mut out, Parser::new_ext(md, opts));
+    let filtered = Parser::new_ext(md, opts).map(|ev| match ev {
+        // pulldown-cmark 0.9 把块级与行内 HTML 都报成 Event::Html
+        Event::Html(s) => Event::Text(s),
+        other => other,
+    });
+    html::push_html(&mut out, filtered);
     out
 }
 
@@ -543,6 +677,7 @@ fn render_diff(text: &str) -> String {
 
 async fn api_feedback(
     State(st): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     APath(token): APath<String>,
     headers: HeaderMap,
     Json(body): Json<serde_json::Value>,
@@ -550,6 +685,14 @@ async fn api_feedback(
     let Ok(meta) = store::load_meta(&st.root, &token) else {
         return (StatusCode::NOT_FOUND, Json(json!({"ok":false}))).into_response();
     };
+    let ip = addr.ip().to_string();
+    if !st.allow_feedback(&ip) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({"ok":false,"error":"提交太快，稍等一分钟再试"})),
+        )
+            .into_response();
+    }
     let Some(text) = body.get("text").and_then(|t| t.as_str()) else {
         return (StatusCode::BAD_REQUEST, Json(json!({"ok":false}))).into_response();
     };
@@ -577,16 +720,21 @@ async fn api_feedback(
             .into_response();
     }
     println!("[反馈] {} : {}", fb.title, fb.text);
+    let cfg = st.current_cfg();
     crate::notify::push(
-        &st.cfg,
+        &cfg,
         &format!("手机反馈 · {}", fb.title),
-        &format!("{}\n可在电脑端运行 remote-hub inbox 查看全文", fb.text),
+        &format!("{}\n可在电脑端运行 postbox inbox 查看全文", fb.text),
     );
     (StatusCode::OK, Json(json!({"ok":true}))).into_response()
 }
 
 pub async fn serve(root: PathBuf, cfg: Config) -> anyhow::Result<()> {
-    let st = Arc::new(AppState { root, cfg: cfg.clone() });
+    let st = Arc::new(AppState {
+        root,
+        cfg: cfg.clone(),
+        fb_hits: Mutex::new(HashMap::new()),
+    });
     let app = Router::new()
         .route("/", get(home))
         .route("/b/{token}", get(bundle_page))
@@ -595,15 +743,210 @@ pub async fn serve(root: PathBuf, cfg: Config) -> anyhow::Result<()> {
         .route("/raw/{token}/{idx}", get(raw_file))
         .route("/d/{token}/{idx}", get(dl_file))
         .route("/m/{token}/{idx}/{name}", get(preview_media))
-        .route(
-            "/api/feedback/{token}",
-            axum::routing::post(api_feedback),
-        )
+        .route("/api/feedback/{token}", axum::routing::post(api_feedback))
+        .layer(middleware::from_fn(security_headers))
         .with_state(st.clone());
-    let addr = format!("0.0.0.0:{}", cfg.port);
-    println!("remote-hub 已启动: http://{addr}  (首页密钥: {})", cfg.access_key);
-    println!("本机体验: http://127.0.0.1:{}/?key={}", cfg.port, cfg.access_key);
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
-    axum::serve(listener, app).await?;
+    let bind = if cfg.bind.trim().is_empty() {
+        "0.0.0.0"
+    } else {
+        cfg.bind.as_str()
+    };
+    let addr = format!("{}:{}", bind, cfg.port);
+    println!(
+        "postbox 已启动: http://{addr}  (首页密钥: {})",
+        cfg.access_key
+    );
+    println!(
+        "本机体验: http://127.0.0.1:{}/?key={}",
+        cfg.port, cfg.access_key
+    );
+    let listener = match tokio::net::TcpListener::bind(&addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            anyhow::bail!(
+                "监听 {addr} 失败: {e}（端口被占用？用 postbox config port <其他端口> 改一个）"
+            )
+        }
+    };
+    // 每小时清一次过期包和临时文件，不依赖有没有人打开首页
+    let cleanup_root = st.root.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(3600));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tick.tick().await;
+            store::cleanup_expired(&cleanup_root);
+        }
+    });
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
     Ok(())
+}
+
+/// Ctrl+C 或注销时优雅退出，别把 cloudflared 子进程留成孤儿
+async fn shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
+    println!("收到退出信号，正在关闭…");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    #[test]
+    fn esc_covers_html_contexts() {
+        assert_eq!(
+            esc("<a href=\"x\">&'"),
+            "&lt;a href=&quot;x&quot;&gt;&amp;&#39;"
+        );
+        assert_eq!(esc("普通文字"), "普通文字");
+    }
+
+    #[test]
+    fn pct_encode_never_emits_control_bytes() {
+        // Content-Disposition 里出现 CR/LF 会让 HeaderValue::from_str 失败，
+        // 这里确认控制字符一律变成 %XX
+        let s = pct_encode("a\r\nb 中文\"'");
+        assert!(!s.contains('\r') && !s.contains('\n'));
+        assert!(s.contains("%0D") && s.contains("%0A"));
+        assert!(s.contains('%'));
+        assert_eq!(pct_encode("report-v1.2.pdf"), "report-v1.2.pdf");
+    }
+
+    #[test]
+    fn classify_maps_extensions() {
+        assert_eq!(classify("a.MD"), Kind::Markdown);
+        assert_eq!(classify("照片.docx"), Kind::Docx);
+        assert_eq!(classify("x.xlsx"), Kind::Sheet);
+        assert_eq!(classify("x.pdf"), Kind::Pdf);
+        assert_eq!(classify("x.zip"), Kind::Binary);
+        assert_eq!(classify("noext"), Kind::Binary);
+    }
+
+    #[test]
+    fn wrap_tables_adds_scroll_container() {
+        let out = wrap_tables("<p>a</p><table><tr><td>1</td></tr></table>");
+        assert!(out.contains("<div class=tw><table>"));
+        assert!(out.contains("</table></div>"));
+    }
+
+    #[test]
+    fn markdown_renders_tables_but_neutralises_raw_html() {
+        let html = render_markdown(
+            "# 标题\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n<script>alert(1)</script>\n",
+        );
+        assert!(html.contains("<h1>标题</h1>"));
+        assert!(html.contains("<table>"));
+        // 原始 HTML 必须被降级成可见文本，不能出现可执行标签
+        assert!(!html.contains("<script>"));
+        assert!(html.contains("&lt;script&gt;"));
+        let inline = render_markdown("前 <b onclick=x>粗</b> 后");
+        assert!(!inline.contains("<b onclick"));
+    }
+
+    #[test]
+    fn diff_lines_get_classes() {
+        let out = render_diff("++x\n-a\n@@ h\n ctx");
+        assert!(out.contains("class=\"add\""));
+        assert!(out.contains("class=\"del\""));
+        assert!(out.contains("class=\"hunk\""));
+    }
+
+    #[test]
+    fn cookie_key_parsing() {
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::COOKIE,
+            HeaderValue::from_static("other=1; pb_key=abc123; x=2"),
+        );
+        assert_eq!(cookie_key(&h), "abc123");
+        assert_eq!(cookie_key(&HeaderMap::new()), "");
+    }
+
+    fn state(tag: &str) -> Arc<AppState> {
+        let root = std::env::temp_dir().join(format!("postbox-serve-{}-{tag}", store::now_ms()));
+        Arc::new(AppState {
+            root,
+            cfg: Config {
+                port: 8712,
+                access_key: "SECRET-KEY-1234567890".into(),
+                base_url: Some("https://tunnel.example".into()),
+                tunnel: false,
+                ntfy_server: "https://ntfy.sh".into(),
+                ntfy_topic: "topic".into(),
+                cloudflared: "tools/cloudflared.exe".into(),
+                bind: "0.0.0.0".into(),
+            },
+            fb_hits: Mutex::new(HashMap::new()),
+        })
+    }
+
+    fn meta() -> BundleMeta {
+        BundleMeta {
+            token: "a".repeat(32),
+            title: "季度复盘".into(),
+            note: "看第 3 页".into(),
+            created_ms: store::now_ms(),
+            expires_ms: Some(store::now_ms() + 86_400_000),
+            files: vec![store::FileEntry {
+                name: "报告.docx".into(),
+                stored: "0_报告.docx".into(),
+                size: 1024,
+            }],
+            has_archive: false,
+        }
+    }
+
+    /// 回归测试：文件页绝不能出现明文首页密钥，否则拿到文件链接就等于拿到首页
+    #[test]
+    fn bundle_page_never_leaks_access_key() {
+        let st = state("leak");
+        let html = bundle_body(&st, &meta());
+        assert!(!html.contains("SECRET-KEY-1234567890"));
+        assert!(!html.contains("?key="));
+        assert!(html.contains("href=\"/\""));
+        assert!(html.contains("季度复盘"));
+        assert!(html.contains("看第 3 页"));
+        std::fs::remove_dir_all(&st.root).ok();
+    }
+
+    #[test]
+    fn expired_bundle_is_not_rendered() {
+        let mut m = meta();
+        m.expires_ms = Some(store::now_ms() - 1);
+        assert!(m.is_expired());
+        let st = state("expired");
+        assert!(store::load_meta(&st.root, &m.token).is_err());
+        std::fs::remove_dir_all(&st.root).ok();
+    }
+
+    #[test]
+    fn feedback_rate_limit_per_ip() {
+        let st = state("rl");
+        for i in 0..FB_PER_MIN {
+            assert!(st.allow_feedback("1.2.3.4"), "第 {} 次应放行", i + 1);
+        }
+        assert!(!st.allow_feedback("1.2.3.4"), "超过配额要拒绝");
+        assert!(st.allow_feedback("5.6.7.8"), "别的 IP 不受影响");
+        std::fs::remove_dir_all(&st.root).ok();
+    }
+
+    #[test]
+    fn file_path_uses_stored_name_only() {
+        let m = meta();
+        let p = m.file_path(&PathBuf::from("/d"), 0).unwrap();
+        assert_eq!(
+            p,
+            PathBuf::from("/d/bundles")
+                .join(&m.token)
+                .join("files")
+                .join("0_报告.docx")
+        );
+        assert!(m.file_path(&PathBuf::from("/d"), 99).is_none());
+    }
 }

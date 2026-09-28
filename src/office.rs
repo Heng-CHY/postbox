@@ -15,16 +15,43 @@ type Zipped = ZipArchive<std::fs::File>;
 const MAX_TEXT: usize = 400 * 1024;
 const MAX_ROWS: usize = 500;
 const MAX_COLS: usize = 40;
+/// 单个 zip 条目解压后的上限，防 zip 炸弹（document.xml 声称 40KB 实际解出 4GB）
+const MAX_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
+/// 单张图片上限
+const MAX_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
+/// 一份文档最多解出多少张内嵌图片
+const MAX_IMAGES: usize = 60;
 
 fn open_zip(path: &Path) -> Result<Zipped> {
     Ok(ZipArchive::new(std::fs::File::open(path)?)?)
 }
 
-fn read_entry(zip: &mut Zipped, name: &str) -> Option<Vec<u8>> {
+/// 读取 zip 条目，声明体积或实际解压结果超限就当作没有，绝不无上限读
+fn read_entry(zip: &mut Zipped, name: &str, max: u64) -> Option<Vec<u8>> {
     let mut e = zip.by_name(name).ok()?;
+    if e.size() > max {
+        return None;
+    }
     let mut buf = Vec::new();
-    e.read_to_end(&mut buf).ok()?;
+    e.by_ref().take(max + 1).read_to_end(&mut buf).ok()?;
+    if buf.len() as u64 > max {
+        return None;
+    }
     Some(buf)
+}
+
+/// docx 内部条目路径归一化：只接受 word/ 下的相对路径，含 .. 的一律拒绝
+fn normalize_entry(target: &str) -> Option<String> {
+    let t = target.trim_start_matches('/');
+    let joined = if t.starts_with("word/") {
+        t.to_string()
+    } else {
+        format!("word/{}", t)
+    };
+    if joined.split('/').any(|seg| seg == "..") {
+        return None;
+    }
+    Some(joined)
 }
 
 fn attr(e: &quick_xml::events::BytesStart, want: &str) -> Option<String> {
@@ -50,7 +77,7 @@ fn new_reader(xml: &str) -> Reader<&[u8]> {
 /// word/_rels/document.xml.rels: rId -> Target
 fn rels(zip: &mut Zipped) -> HashMap<String, String> {
     let mut map = HashMap::new();
-    let Some(bytes) = read_entry(zip, "word/_rels/document.xml.rels") else {
+    let Some(bytes) = read_entry(zip, "word/_rels/document.xml.rels", MAX_ENTRY_BYTES) else {
         return map;
     };
     let Ok(xml) = String::from_utf8(bytes) else {
@@ -76,7 +103,7 @@ fn rels(zip: &mut Zipped) -> HashMap<String, String> {
 /// 把 .docx 转成 HTML。media_dir 给出时，内嵌图片解到该目录并用 url_prefix 引用。
 pub fn docx_to_html(path: &Path, media: Option<(&Path, &str)>) -> Result<String> {
     let mut zip = open_zip(path)?;
-    let Some(bytes) = read_entry(&mut zip, "word/document.xml") else {
+    let Some(bytes) = read_entry(&mut zip, "word/document.xml", MAX_ENTRY_BYTES) else {
         return Err(anyhow!("不是有效的 docx，缺 word/document.xml"));
     };
     let xml = String::from_utf8(bytes)?;
@@ -95,6 +122,7 @@ pub fn docx_to_html(path: &Path, media: Option<(&Path, &str)>) -> Result<String>
     let mut strike = false;
     let mut link_id = String::new();
     let mut link_at = usize::MAX;
+    let mut imgs = 0usize;
     let mut list_open = false;
     let mut skip = 0usize;
 
@@ -112,6 +140,9 @@ pub fn docx_to_html(path: &Path, media: Option<(&Path, &str)>) -> Result<String>
                         para.clear();
                         style.clear();
                         list_lvl = None;
+                        // 段首必须重置 link_at：否则上一段残留的下标会落到
+                        // 本段中间，drain 到非字符边界直接 panic
+                        link_at = usize::MAX;
                     }
                     "w:pStyle" => style = attr(&e, "w:val").unwrap_or_default(),
                     "w:numPr" => {
@@ -171,7 +202,7 @@ pub fn docx_to_html(path: &Path, media: Option<(&Path, &str)>) -> Result<String>
                         let rid = attr(&e, "r:embed").or_else(|| attr(&e, "r:link"));
                         if let Some(img) = rid
                             .as_deref()
-                            .and_then(|id| extract_image(&mut zip, &rels, id, media))
+                            .and_then(|id| extract_image(&mut zip, &rels, id, media, &mut imgs))
                         {
                             run.push_str(&img);
                         }
@@ -184,7 +215,8 @@ pub fn docx_to_html(path: &Path, media: Option<(&Path, &str)>) -> Result<String>
                     continue;
                 }
                 let t = e.xml10_content().into_owned();
-                if t.is_empty() {
+                // 纯空白节点是格式化 XML 留下的换行，不是正文（真正的空格在 w:t 内部）
+                if t.trim().is_empty() {
                     continue;
                 }
                 run.push_str(&wrap_runs(&esc(&t), bold, italic, underline, strike));
@@ -214,7 +246,8 @@ pub fn docx_to_html(path: &Path, media: Option<(&Path, &str)>) -> Result<String>
                         strike = false;
                     }
                     "w:hyperlink" => {
-                        let inner = if link_at <= para.len() {
+                        let ok = link_at <= para.len() && para.is_char_boundary(link_at);
+                        let inner = if ok {
                             para.drain(link_at..).collect::<String>()
                         } else {
                             std::mem::take(&mut run)
@@ -235,11 +268,19 @@ pub fn docx_to_html(path: &Path, media: Option<(&Path, &str)>) -> Result<String>
                         if skip == 0 {
                             let content = format!("{}{}", para, std::mem::take(&mut run));
                             para.clear();
+                            link_at = usize::MAX;
+                            link_id.clear();
                             if !content.trim().is_empty() || in_table > 0 {
                                 if in_table > 0 {
                                     cell.push(content);
                                 } else {
-                                    push_block(&mut out, &mut list_open, &style, list_lvl, &content);
+                                    push_block(
+                                        &mut out,
+                                        &mut list_open,
+                                        &style,
+                                        list_lvl,
+                                        &content,
+                                    );
                                 }
                             }
                         }
@@ -373,19 +414,20 @@ fn extract_image(
     rels: &HashMap<String, String>,
     rid: &str,
     media: Option<(&Path, &str)>,
+    count: &mut usize,
 ) -> Option<String> {
     let (dir, url_prefix) = media?;
+    if *count >= MAX_IMAGES {
+        return None;
+    }
     let target = rels.get(rid)?;
-    let entry = if let Some(t) = target.strip_prefix('/') {
-        t.to_string()
-    } else {
-        format!("word/{}", target)
-    };
-    let entry = entry.replace("word/../", "");
-    let data = read_entry(zip, &entry)?;
-    let fname = entry.rsplit('/').next()?.replace(['/', '\\', ':'], "");
+    let entry = normalize_entry(target)?;
+    let data = read_entry(zip, &entry, MAX_IMAGE_BYTES)?;
+    let raw = entry.rsplit('/').next()?;
+    let fname = crate::store::sanitize_name(raw);
     std::fs::create_dir_all(dir).ok()?;
     std::fs::write(dir.join(&fname), &data).ok()?;
+    *count += 1;
     Some(format!(
         "<img class=preview src=\"{}/{}\">",
         url_prefix.trim_end_matches('/'),
@@ -400,9 +442,7 @@ pub fn sheets_to_html(path: &Path) -> Result<String> {
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_lowercase();
-    let f = || -> Result<std::fs::File> {
-        Ok(std::fs::File::open(path)?)
-    };
+    let f = || -> Result<std::fs::File> { Ok(std::fs::File::open(path)?) };
     match ext.as_str() {
         "xlsx" | "xlsm" => render_book(Xlsx::new(f()?)?),
         "xls" => render_book(Xls::new(f()?)?),
@@ -444,4 +484,139 @@ fn render_book<R: std::io::Read + std::io::Seek, W: calamine::Reader<R>>(
         return Err(anyhow!("表格里没有可读内容"));
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write as _;
+    use std::path::PathBuf;
+
+    #[test]
+    fn entity_char_maps_named_and_numeric() {
+        assert_eq!(entity_char("amp"), Some('&'));
+        assert_eq!(entity_char("quot"), Some('"'));
+        assert_eq!(entity_char("#8212"), Some('—'));
+        assert_eq!(entity_char("#x2014"), Some('—'));
+        assert_eq!(entity_char("nbsp"), None);
+        assert_eq!(entity_char("#999999999999"), None);
+    }
+
+    #[test]
+    fn heading_level_handles_english_and_cn_style_ids() {
+        assert_eq!(heading_level("Heading1"), Some(1));
+        assert_eq!(heading_level("heading 3"), Some(3));
+        assert_eq!(heading_level("Title"), Some(1));
+        assert_eq!(heading_level("Subtitle"), Some(2));
+        assert_eq!(heading_level("2"), Some(2));
+        assert_eq!(heading_level("Normal"), None);
+        assert_eq!(heading_level("Heading9"), Some(6));
+    }
+
+    #[test]
+    fn wrap_runs_nests_in_order() {
+        assert_eq!(
+            wrap_runs("x", true, true, false, true),
+            "<b><i><s>x</s></i></b>"
+        );
+        assert_eq!(wrap_runs("x", false, false, false, false), "x");
+    }
+
+    #[test]
+    fn normalize_entry_rejects_traversal() {
+        assert_eq!(
+            normalize_entry("media/image1.png"),
+            Some("word/media/image1.png".into())
+        );
+        assert_eq!(
+            normalize_entry("/word/styles.xml"),
+            Some("word/styles.xml".into())
+        );
+        assert_eq!(normalize_entry("../secret.txt"), None);
+        assert_eq!(normalize_entry("word/../../secret.txt"), None);
+    }
+
+    /// 现场拼一个最小 docx，验证标题/加粗/超链接/表格都能转出来且文字被转义
+    fn mini_docx(dir: &Path) -> PathBuf {
+        std::fs::create_dir_all(dir).ok();
+        let path = dir.join("mini.docx");
+        let zf = std::fs::File::create(&path).unwrap();
+        let mut zw = zip::ZipWriter::new(zf);
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        let document = r#"<?xml version="1.0"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<w:body>
+<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>季度复盘</w:t></w:r></w:p>
+<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>收入</w:t></w:r><w:r><w:t>&lt;script&gt;x</w:t></w:r>
+<w:hyperlink r:id="rId1"><w:r><w:t>ntfy.sh</w:t></w:r></w:hyperlink></w:p>
+<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/></w:numPr></w:pPr><w:r><w:t>条目一</w:t></w:r></w:p>
+<w:tbl><w:tr><w:tc><w:p><w:r><w:t>甲</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>乙</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
+<w:p><w:r><w:t>尾段</w:t></w:r></w:p>
+</w:body></w:document>"#;
+        let rels = r#"<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="hyperlink" Target="https://ntfy.sh" TargetMode="External"/>
+</Relationships>"#;
+        zw.start_file("word/document.xml", opts).unwrap();
+        zw.write_all(document.as_bytes()).unwrap();
+        zw.start_file("word/_rels/document.xml.rels", opts).unwrap();
+        zw.write_all(rels.as_bytes()).unwrap();
+        zw.finish().unwrap();
+        path
+    }
+
+    #[test]
+    fn docx_to_html_renders_structure() {
+        let dir = std::env::temp_dir().join(format!("postbox-office-{}", std::process::id()));
+        let path = mini_docx(&dir);
+        let html = docx_to_html(&path, None).unwrap();
+        assert!(html.contains("<h1>季度复盘</h1>"), "{html}");
+        assert!(html.contains("<b>收入</b>"));
+        // 文档里的 <script> 必须只是可见文本
+        assert!(!html.contains("<script>"));
+        assert!(html.contains("&lt;script&gt;"));
+        assert!(html.contains("href=\"https://ntfy.sh\""));
+        assert!(html.contains("ntfy.sh</a>"));
+        assert!(html.contains("<ul>"));
+        assert!(html.contains("条目一"));
+        assert!(html.contains("<table>"));
+        assert!(html.contains("<td>甲</td>"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn docx_rejects_non_zip_and_empty() {
+        let dir = std::env::temp_dir().join(format!("postbox-office-bad-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let junk = dir.join("junk.docx");
+        std::fs::write(&junk, b"not a zip at all").unwrap();
+        assert!(docx_to_html(&junk, None).is_err());
+        // 合法 zip 但缺 document.xml
+        let empty = dir.join("empty.docx");
+        let mut zw = zip::ZipWriter::new(std::fs::File::create(&empty).unwrap());
+        zw.start_file(
+            "[Content_Types].xml",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        zw.write_all(b"<x/>").unwrap();
+        zw.finish().unwrap();
+        assert!(docx_to_html(&empty, None).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn sheets_from_repo_fixture_if_present() {
+        // 仓库自带的预览样本，缺就跳过（例如只跑了 source 包）
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("demo")
+            .join("预览样本.xlsx");
+        if !path.exists() {
+            return;
+        }
+        let html = sheets_to_html(&path).unwrap();
+        assert!(html.contains("<table>"));
+        assert!(html.contains("<h2>"));
+    }
 }

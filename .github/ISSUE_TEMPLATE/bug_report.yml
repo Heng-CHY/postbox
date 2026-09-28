@@ -1,0 +1,91 @@
+name: Bug report
+description: Something does not work the way the README says it should
+title: "[bug] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Not a bug report?** If the issue is a security problem (path traversal,
+        auth bypass, the access key appearing on a page, code execution through a
+        preview), do not file it here — follow the private route described in
+        `SECURITY.md`.
+
+        Before you post, it helps to know: the free quick tunnel hands out a **new
+        hostname every time `postbox up` restarts**, so links from before a reboot
+        are expected to stop working. That is documented behaviour, not a bug.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what the page or CLI said, what you expected instead.
+      placeholder: |
+        Ran `postbox publish demo/预览样本.docx`, tapped the pushed link on the phone,
+        the page said "链接不存在或已过期".
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. `postbox init`
+        2. `postbox up`
+        3. `postbox publish README.md`
+        4. open the link on the phone
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part failed
+      options:
+        - Phone page / preview rendering
+        - Download or zip
+        - ntfy push (no notification arrived)
+        - Tunnel / public address
+        - MCP tools in an agent client
+        - CLI itself (init, config, autostart)
+        - Build or tests
+        - Something else
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: postbox version or commit
+      description: '`postbox --version` output, or the commit you built from.'
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS on the machine running postbox
+      placeholder: 'e.g. Windows 11 23H2, Ubuntu 24.04, macOS 15'
+    validations:
+      required: true
+  - type: input
+    id: phone
+    attributes:
+      label: Phone / browser that opened the link
+      description: Device, OS and browser matter for preview bugs.
+      placeholder: 'e.g. OPPO Pad / Android 15 / Edge, iOS 18 / Safari'
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output
+      description: Console output from `postbox up`, the page's error text, `postbox config port get`, etc. Paste as text, not a photo, and redact anything private.
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I ran the command from the directory that holds `data/` (or passed `--root` pointing at it)
+          required: true
+        - label: The service was actually running (`postbox up` or `postbox serve`)
+          required: true
+        - label: I am using a link generated after the most recent `postbox up` restart
+          required: true
+        - label: I redacted file names, tokens and keys that are not mine to share
+          required: true

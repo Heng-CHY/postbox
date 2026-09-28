@@ -1,0 +1,53 @@
+name: Feature request
+description: A change you would like to see
+title: "[feature] "
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Two things this project will not take on, so a request along those lines
+        will likely be closed rather than argued with: anything that stores your
+        files on a third party (telemetry, cloud sync, "upload to X"), and adding
+        an account/password system that breaks the "forward the link and it works"
+        property. Everything else is worth discussing.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What is hard today
+      description: Describe the situation you ran into, not the solution. "I had to…" tells more than "please add a flag".
+      placeholder: |
+        I keep the server on a home PC and my phone is often on mobile data. After
+        a power cut the hostname changed and every link I had already forwarded to
+        my manager was dead, and there was no way to tell which old bundle went where.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like instead
+      description: One or two paragraphs. Rough is fine.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: Including "just use a cloud drive" — say why that did not work for you.
+  - type: dropdown
+    id: skill
+    attributes:
+      label: Would you send a pull request?
+      options:
+        - Yes, I will open a PR
+        - I can test a branch, not write it
+        - No, just describing it
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: I read the Limitations section of the README and this is not already listed there as a deliberate choice
+          required: true
+        - label: I understand the web UI strings are Chinese-only today (i18n is a separate, welcome, larger change)
+          required: false

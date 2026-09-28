@@ -1,9 +1,21 @@
-use std::path::PathBuf;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use chrono::{Local, TimeZone};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+/// 反馈收件箱文件超过这个大小就裁掉最旧的记录，避免无限增长
+pub const FEEDBACK_MAX_BYTES: u64 = 4 * 1024 * 1024;
+/// 单次发布允许的最大文件数
+pub const MAX_FILES_PER_BUNDLE: usize = 200;
+/// data/tmp 下的临时文件保留时长（Word 预览解出的图片、publish_text 落盘）
+pub const TMP_MAX_AGE_MS: i64 = 24 * 3600 * 1000;
+
+fn default_bind() -> String {
+    "0.0.0.0".into()
+}
 
 /// 全局配置，存于 data/config.json
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,6 +33,9 @@ pub struct Config {
     pub ntfy_topic: String,
     #[serde(default)]
     pub cloudflared: String,
+    /// 监听地址。公网隧道场景保持 0.0.0.0 即可；只想局域网用可改成 127.0.0.1
+    #[serde(default = "default_bind")]
+    pub bind: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,6 +57,22 @@ pub struct BundleMeta {
     pub files: Vec<FileEntry>,
     #[serde(default)]
     pub has_archive: bool,
+}
+
+impl BundleMeta {
+    /// 读路径的统一有效期判断：过期即视为不存在
+    pub fn is_expired(&self) -> bool {
+        self.expires_ms.map(|e| e < now_ms()).unwrap_or(false)
+    }
+
+    pub fn file_path(&self, root: &Path, idx: usize) -> Option<PathBuf> {
+        self.files.get(idx).map(|f| {
+            root.join("bundles")
+                .join(&self.token)
+                .join("files")
+                .join(&f.stored)
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,14 +134,22 @@ pub fn sanitize_name(name: &str) -> String {
     }
 }
 
-fn bundles_dir(root: &PathBuf) -> PathBuf {
+/// token 必须是 uuid 简单格式，杜绝目录穿越
+pub fn valid_token(token: &str) -> bool {
+    !token.is_empty() && token.len() <= 64 && token.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn bundles_dir(root: &Path) -> PathBuf {
     root.join("bundles")
 }
 
-/// 首次运行时创建目录结构并生成配置
-pub fn init_root(root: &PathBuf) -> Result<Config> {
+/// 首次运行时创建目录结构并生成配置。
+/// 注意：数据目录不存在时这里会静默新建一套（含随机密钥与 ntfy 主题），
+/// 所以 main.rs 在非 init 子命令前会先检查目录是否已存在。
+pub fn init_root(root: &Path) -> Result<Config> {
     std::fs::create_dir_all(root.join("bundles"))?;
     std::fs::create_dir_all(root.join("inbox"))?;
+    std::fs::create_dir_all(root.join("tmp"))?;
     let cfg_path = root.join("config.json");
     if cfg_path.exists() {
         let mut cfg = load_config_raw(&cfg_path)?;
@@ -128,6 +167,10 @@ pub fn init_root(root: &PathBuf) -> Result<Config> {
             cfg.cloudflared = "tools/cloudflared.exe".into();
             dirty = true;
         }
+        if cfg.bind.is_empty() {
+            cfg.bind = default_bind();
+            dirty = true;
+        }
         if dirty {
             save_config(root, &cfg)?;
         }
@@ -141,8 +184,9 @@ pub fn init_root(root: &PathBuf) -> Result<Config> {
         ntfy_server: "https://ntfy.sh".into(),
         ntfy_topic: Uuid::new_v4().simple().to_string(),
         cloudflared: "tools/cloudflared.exe".into(),
+        bind: default_bind(),
     };
-    std::fs::write(&cfg_path, serde_json::to_string_pretty(&cfg)?)?;
+    write_atomic(&cfg_path, serde_json::to_string_pretty(&cfg)?.as_bytes())?;
     Ok(cfg)
 }
 
@@ -152,7 +196,7 @@ fn load_config_raw(cfg_path: &std::path::Path) -> Result<Config> {
     Ok(cfg)
 }
 
-pub fn load_config(root: &PathBuf) -> Result<Config> {
+pub fn load_config(root: &Path) -> Result<Config> {
     let cfg_path = root.join("config.json");
     if !cfg_path.exists() {
         return init_root(root);
@@ -160,29 +204,60 @@ pub fn load_config(root: &PathBuf) -> Result<Config> {
     load_config_raw(&cfg_path)
 }
 
-pub fn save_config(root: &PathBuf, cfg: &Config) -> Result<()> {
-    std::fs::write(root.join("config.json"), serde_json::to_string_pretty(cfg)?)?;
-    Ok(())
+/// 先写临时文件再 rename，避免写一半被杀导致 config.json 损坏
+fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, bytes)?;
+    match std::fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        // Windows 上目标被占用时 rename 会失败，退回直接写
+        Err(_) => {
+            std::fs::write(path, bytes)?;
+            let _ = std::fs::remove_file(&tmp);
+            Ok(())
+        }
+    }
 }
 
-fn bundle_dir(root: &PathBuf, token: &str) -> PathBuf {
+pub fn save_config(root: &Path, cfg: &Config) -> Result<()> {
+    write_atomic(
+        &root.join("config.json"),
+        serde_json::to_string_pretty(cfg)?.as_bytes(),
+    )
+}
+
+/// 读-改-写：每次都在磁盘最新内容上改单个字段。
+/// 隧道线程和 CLI 都会写配置，用旧快照整体覆盖会把对方的修改抹掉。
+pub fn update_config<F>(root: &Path, f: F) -> Result<Config>
+where
+    F: FnOnce(&mut Config),
+{
+    let mut cfg = load_config(root)?;
+    f(&mut cfg);
+    save_config(root, &cfg)?;
+    Ok(cfg)
+}
+
+fn bundle_dir(root: &Path, token: &str) -> PathBuf {
     bundles_dir(root).join(token)
 }
 
-pub fn load_meta(root: &PathBuf, token: &str) -> Result<BundleMeta> {
-    // token 只允许十六进制字符，防目录穿越
-    if token.is_empty() || !token.chars().all(|c| c.is_ascii_hexdigit()) {
+pub fn load_meta(root: &Path, token: &str) -> Result<BundleMeta> {
+    if !valid_token(token) {
         bail!("非法 token");
     }
     let p = bundle_dir(root, token).join("meta.json");
     let text = std::fs::read_to_string(p)?;
     let meta: BundleMeta = serde_json::from_str(&text)?;
+    if meta.is_expired() {
+        bail!("已过期");
+    }
     Ok(meta)
 }
 
-/// 发布若干文件为一个 bundle；多文件时自动打 zip（依赖系统 tar）
+/// 发布若干文件为一个 bundle；多文件时用 zip crate 自己打包，不依赖系统 tar
 pub fn publish(
-    root: &PathBuf,
+    root: &Path,
     paths: &[PathBuf],
     title: Option<String>,
     note: String,
@@ -191,12 +266,19 @@ pub fn publish(
     if paths.is_empty() {
         bail!("至少要指定一个文件");
     }
+    if paths.len() > MAX_FILES_PER_BUNDLE {
+        bail!(
+            "一次最多 {MAX_FILES_PER_BUNDLE} 个文件，当前 {} 个",
+            paths.len()
+        );
+    }
     init_root(root)?;
     let token = Uuid::new_v4().simple().to_string();
     let dir = bundle_dir(root, &token).join("files");
     std::fs::create_dir_all(&dir)?;
 
     let mut files = Vec::new();
+    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (i, p) in paths.iter().enumerate() {
         let meta = std::fs::metadata(p).with_context(|| format!("找不到文件: {}", p.display()))?;
         if !meta.is_file() {
@@ -208,8 +290,12 @@ pub fn publish(
             .unwrap_or_else(|| format!("file{i}"));
         let stored = format!("{i}_{}", sanitize_name(&name));
         std::fs::copy(p, dir.join(&stored))?;
+        let mut entry_name = name.clone();
+        if !used.insert(entry_name.clone()) {
+            entry_name = format!("{i}_{name}");
+        }
         files.push(FileEntry {
-            name,
+            name: entry_name,
             stored,
             size: meta.len(),
         });
@@ -218,17 +304,12 @@ pub fn publish(
     let mut has_archive = false;
     if files.len() > 1 {
         let zip = bundle_dir(root, &token).join("archive.zip");
-        let mut cmd = std::process::Command::new("tar");
-        cmd.args(["-a", "-c", "-f"])
-            .arg(&zip)
-            .arg("-C")
-            .arg(&dir);
-        for f in &files {
-            cmd.arg(&f.stored);
-        }
-        match cmd.output() {
-            Ok(o) if o.status.success() => has_archive = true,
-            _ => eprintln!("提示: 打包 zip 失败，单文件下载不受影响"),
+        match write_zip(&zip, &dir, &files) {
+            Ok(()) => has_archive = true,
+            Err(e) => {
+                let _ = std::fs::remove_file(&zip);
+                eprintln!("提示: 打包 zip 失败（{e}），单文件下载不受影响");
+            }
         }
     }
 
@@ -246,16 +327,36 @@ pub fn publish(
         files,
         has_archive,
     };
-    std::fs::write(
-        bundle_dir(root, &meta.token).join("meta.json"),
-        serde_json::to_string_pretty(&meta)?,
+    write_atomic(
+        &bundle_dir(root, &meta.token).join("meta.json"),
+        serde_json::to_string_pretty(&meta)?.as_bytes(),
     )?;
     cleanup_expired(root);
     Ok(meta)
 }
 
-/// 过期 bundle 自动清理（连同其文档预览解出的临时图片）
-pub fn cleanup_expired(root: &PathBuf) {
+/// 用 zip crate 直接生成 archive.zip（Windows 的 tar 是 bsdtar，Linux 的 GNU tar
+/// 不认 `-a xxx.zip`，所以不再走外部命令）
+fn write_zip(out: &Path, dir: &Path, files: &[FileEntry]) -> Result<()> {
+    use zip::write::SimpleFileOptions;
+    let zf = std::fs::File::create(out)?;
+    let mut zw = zip::ZipWriter::new(zf);
+    let opts = SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
+        .large_file(true);
+    let mut buf = Vec::new();
+    for f in files {
+        zw.start_file(&f.name, opts)?;
+        buf.clear();
+        std::fs::File::open(dir.join(&f.stored))?.read_to_end(&mut buf)?;
+        zw.write_all(&buf)?;
+    }
+    zw.finish()?;
+    Ok(())
+}
+
+/// 过期 bundle 自动清理，顺带扫掉 tmp/ 里的残留（预览图片、publish_text 落盘文件）
+pub fn cleanup_expired(root: &Path) {
     let now = now_ms();
     let mut dead = Vec::new();
     if let Ok(rd) = std::fs::read_dir(bundles_dir(root)) {
@@ -272,19 +373,42 @@ pub fn cleanup_expired(root: &PathBuf) {
             }
         }
     }
-    if !dead.is_empty() {
-        if let Ok(rd) = std::fs::read_dir(root.join("tmp")) {
-            for e in rd.flatten() {
-                let name = e.file_name().to_string_lossy().to_string();
-                if dead.iter().any(|t| name.starts_with(&format!("m-{t}-"))) {
-                    let _ = std::fs::remove_dir_all(e.path());
-                }
+    let tmp = root.join("tmp");
+    let Ok(rd) = std::fs::read_dir(&tmp) else {
+        return;
+    };
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        // 包已经不在了，预览图片就是孤儿
+        if let Some(t) = name.strip_prefix("m-").and_then(|r| r.split('-').next()) {
+            if dead.iter().any(|d| d == t) || load_meta(root, t).is_err() {
+                let _ = std::fs::remove_dir_all(e.path());
+            }
+            // 包还活着：这些图片是预览的一部分，跟着包一起活，不按时间淘汰
+            continue;
+        }
+        // 其余临时文件按时间淘汰
+        let stale = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .map(|t| {
+                t.elapsed()
+                    .map(|d| d.as_millis() as i64 > TMP_MAX_AGE_MS)
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+        if stale {
+            let path = e.path();
+            if path.is_dir() {
+                let _ = std::fs::remove_dir_all(&path);
+            } else {
+                let _ = std::fs::remove_file(&path);
             }
         }
     }
 }
 
-pub fn list_bundles(root: &PathBuf) -> Vec<BundleMeta> {
+pub fn list_bundles(root: &Path) -> Vec<BundleMeta> {
     let mut out = Vec::new();
     if let Ok(rd) = std::fs::read_dir(bundles_dir(root)) {
         for e in rd.flatten() {
@@ -294,26 +418,45 @@ pub fn list_bundles(root: &PathBuf) -> Vec<BundleMeta> {
             }
         }
     }
-    out.sort_by(|a, b| b.created_ms.cmp(&a.created_ms));
+    out.sort_by_key(|b| std::cmp::Reverse(b.created_ms));
     out
 }
 
-fn feedback_file(root: &PathBuf) -> PathBuf {
+fn feedback_file(root: &Path) -> PathBuf {
     root.join("inbox").join("feedback.jsonl")
 }
 
-pub fn append_feedback(root: &PathBuf, fb: &Feedback) -> Result<()> {
+pub fn append_feedback(root: &Path, fb: &Feedback) -> Result<()> {
     std::fs::create_dir_all(root.join("inbox"))?;
-    use std::io::Write;
+    let path = feedback_file(root);
     let mut f = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(feedback_file(root))?;
+        .open(&path)?;
     writeln!(f, "{}", serde_json::to_string(fb)?)?;
+    rotate_feedback(&path);
     Ok(())
 }
 
-pub fn list_feedback(root: &PathBuf, limit: usize) -> Vec<Feedback> {
+/// 收件箱文件只保留较新的部分，避免单请求全量读盘越来越慢
+fn rotate_feedback(path: &Path) {
+    let Ok(len) = path.metadata().map(|m| m.len()) else {
+        return;
+    };
+    if len < FEEDBACK_MAX_BYTES {
+        return;
+    }
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let lines: Vec<&str> = text.lines().collect();
+    // 保留最近的一半，但不少于 1000 行
+    let keep = (lines.len() / 2).max(1000).min(lines.len());
+    let body = lines[lines.len() - keep..].join("\n");
+    let _ = write_atomic(path, format!("{body}\n").as_bytes());
+}
+
+pub fn list_feedback(root: &Path, limit: usize) -> Vec<Feedback> {
     let mut all = Vec::new();
     if let Ok(text) = std::fs::read_to_string(feedback_file(root)) {
         for line in text.lines() {
@@ -322,7 +465,185 @@ pub fn list_feedback(root: &PathBuf, limit: usize) -> Vec<Feedback> {
             }
         }
     }
-    all.sort_by(|a, b| b.ms.cmp(&a.ms));
+    all.sort_by_key(|f| std::cmp::Reverse(f.ms));
     all.truncate(limit);
     all
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp_root(tag: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "postbox-test-{}-{tag}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn sanitize_name_blocks_traversal() {
+        assert_eq!(sanitize_name("../../etc/passwd"), "_.._etc_passwd");
+        assert!(!sanitize_name("../../etc/passwd").contains('/'));
+        assert_eq!(sanitize_name("   "), "file");
+        assert_eq!(sanitize_name(".."), "file");
+        assert_eq!(sanitize_name("报告 v2.pdf"), "报告 v2.pdf");
+        assert_eq!(sanitize_name("a:b*c?d\"e<f>g|h"), "a_b_c_d_e_f_g_h");
+        assert!(sanitize_name(&"长".repeat(300)).chars().count() <= 120);
+    }
+
+    #[test]
+    fn valid_token_shape() {
+        assert!(valid_token(&Uuid::new_v4().simple().to_string()));
+        assert!(!valid_token(""));
+        assert!(!valid_token(".."));
+        assert!(!valid_token("../../x"));
+        assert!(!valid_token("deadbeef%2F"));
+        assert!(!valid_token("x".repeat(100).as_str()));
+    }
+
+    #[test]
+    fn init_then_update_config_keeps_other_fields() {
+        let root = tmp_root("cfg");
+        let first = init_root(&root).unwrap();
+        // 模拟隧道线程只改 base_url
+        update_config(&root, |c| {
+            c.base_url = Some("https://example.invalid".into())
+        })
+        .unwrap();
+        // 模拟 CLI 之后改 port：不应把 base_url 抹掉
+        update_config(&root, |c| c.port = 9999).unwrap();
+        let cfg = load_config(&root).unwrap();
+        assert_eq!(cfg.port, 9999);
+        assert_eq!(cfg.base_url.as_deref(), Some("https://example.invalid"));
+        assert_eq!(cfg.access_key, first.access_key);
+        assert_eq!(cfg.bind, "0.0.0.0");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn publish_zip_and_expiry() {
+        let root = tmp_root("pub");
+        let dir = std::env::temp_dir().join(format!("postbox-test-src-{}", now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.txt");
+        let b = dir.join("b.txt");
+        std::fs::write(&a, b"hello").unwrap();
+        std::fs::write(&b, b"world").unwrap();
+
+        let meta = publish(
+            &root,
+            &[a.clone(), b.clone()],
+            Some("测试包".into()),
+            "备注".into(),
+            1,
+        )
+        .unwrap();
+        assert_eq!(meta.files.len(), 2);
+        assert!(meta.has_archive, "多文件应生成 zip");
+        let zip = bundle_dir(&root, &meta.token).join("archive.zip");
+        let zf = std::fs::File::open(&zip).unwrap();
+        let mut za = zip::ZipArchive::new(zf).unwrap();
+        assert_eq!(za.len(), 2);
+        let mut s = String::new();
+        za.by_name("a.txt").unwrap().read_to_string(&mut s).unwrap();
+        assert_eq!(s, "hello");
+
+        // 同名的两个文件在 zip 里不能互相覆盖
+        let c = dir.join("dup.txt");
+        std::fs::write(&c, b"1").unwrap();
+        let meta2 = publish(&root, &[c.clone(), c.clone()], None, "".into(), 0).unwrap();
+        assert_eq!(meta2.files.len(), 2);
+        assert_ne!(meta2.files[0].name, meta2.files[1].name);
+
+        // 过期的包读不出来
+        let mut expired = meta.clone();
+        expired.expires_ms = Some(now_ms() - 1000);
+        std::fs::write(
+            bundle_dir(&root, &expired.token).join("meta.json"),
+            serde_json::to_string(&expired).unwrap(),
+        )
+        .unwrap();
+        assert!(load_meta(&root, &expired.token).is_err());
+        cleanup_expired(&root);
+        assert!(!bundle_dir(&root, &expired.token).exists());
+        assert!(list_bundles(&root).iter().all(|b| !b.is_expired()));
+
+        std::fs::remove_dir_all(root).ok();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// 预览图片的生命周期跟着包走，不跟时钟走；普通临时文件才按时间淘汰
+    #[test]
+    fn preview_media_follows_the_bundle() {
+        use std::time::{Duration, SystemTime};
+        let root = tmp_root("media");
+        init_root(&root).unwrap();
+        let src = std::env::temp_dir().join(format!("postbox-media-src-{}.txt", now_ms()));
+        std::fs::write(&src, b"body").unwrap();
+        let meta = publish(&root, std::slice::from_ref(&src), None, "".into(), 1).unwrap();
+
+        let media = root.join("tmp").join(format!("m-{}-0", meta.token));
+        std::fs::create_dir_all(&media).unwrap();
+        std::fs::write(media.join("img.png"), b"png").unwrap();
+
+        // 一个三天前的普通临时文件，应该被扫掉
+        let stale = root.join("tmp").join("leftover.txt");
+        std::fs::write(&stale, b"old").unwrap();
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&stale)
+            .unwrap();
+        f.set_modified(SystemTime::now() - Duration::from_secs(3 * 86400))
+            .unwrap();
+        drop(f);
+
+        cleanup_expired(&root);
+        assert!(media.exists(), "包还在，预览图片不能被时间规则删掉");
+        assert!(!stale.exists(), "三天前的临时文件应该被清掉");
+
+        // 包过期后，图片和包一起消失
+        let mut expired = meta.clone();
+        expired.expires_ms = Some(now_ms() - 1000);
+        std::fs::write(
+            bundle_dir(&root, &expired.token).join("meta.json"),
+            serde_json::to_string(&expired).unwrap(),
+        )
+        .unwrap();
+        cleanup_expired(&root);
+        assert!(!bundle_dir(&root, &meta.token).exists());
+        assert!(
+            !media.exists(),
+            "包没了以后 tmp 里的预览图片要跟着清掉，不留孤儿"
+        );
+
+        std::fs::remove_dir_all(root).ok();
+        std::fs::remove_file(src).ok();
+    }
+
+    #[test]
+    fn feedback_roundtrip_and_limit() {
+        let root = tmp_root("fb");
+        init_root(&root).unwrap();
+        for i in 0..5 {
+            append_feedback(
+                &root,
+                &Feedback {
+                    ms: now_ms() + i,
+                    token: "a".repeat(32),
+                    title: "t".into(),
+                    text: format!("第 {i} 条"),
+                    ua: "test".into(),
+                },
+            )
+            .unwrap();
+        }
+        let top = list_feedback(&root, 2);
+        assert_eq!(top.len(), 2);
+        assert_eq!(top[0].text, "第 4 条");
+        std::fs::remove_dir_all(root).ok();
+    }
 }
