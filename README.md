@@ -123,7 +123,7 @@ macOS and Linux run the server, tunnel and MCP side fine — keep the process al
 your own supervisor instead.
 
 ```bash
-git clone https://github.com/<you>/postbox.git
+git clone https://github.com/Heng-CHY/postbox.git
 cd postbox
 cargo build --release
 
@@ -142,7 +142,7 @@ The same three steps in PowerShell, which is what most Windows users will paste
 (`.\` prefix and `.exe` are required, and there is no `mkdir -p`):
 
 ```powershell
-git clone https://github.com/<you>/postbox.git; cd postbox
+git clone https://github.com/Heng-CHY/postbox.git; cd postbox
 cargo build --release
 
 .\target\release\postbox.exe init

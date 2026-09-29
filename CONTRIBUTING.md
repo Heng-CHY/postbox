@@ -7,7 +7,7 @@ model, and `cargo fmt` / `cargo clippy -D warnings` / `cargo test` are green.
 ## Development setup
 
 ```bash
-git clone <this repository> && cd postbox
+git clone https://github.com/Heng-CHY/postbox.git && cd postbox
 cargo build --release                # MSRV 1.88 (inherited from zip/calamine/encoding_rs)
 rustup component add rustfmt clippy  # needs the components, install them if missing
 ```

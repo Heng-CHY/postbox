@@ -113,7 +113,7 @@ agent   │  postbox mcp ──写入──▶ data/             │
 只是跳过 `autostart`，用你自己的方式保活。
 
 ```bash
-git clone https://github.com/<你的账号>/postbox.git
+git clone https://github.com/Heng-CHY/postbox.git
 cd postbox
 cargo build --release
 
@@ -132,7 +132,7 @@ curl -L -o tools/cloudflared.exe https://github.com/cloudflare/cloudflared/relea
 而且没有 `mkdir -p`）：
 
 ```powershell
-git clone https://github.com/<你的账号>/postbox.git; cd postbox
+git clone https://github.com/Heng-CHY/postbox.git; cd postbox
 cargo build --release
 
 .\target\release\postbox.exe init
