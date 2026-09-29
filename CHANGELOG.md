@@ -6,25 +6,6 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-### Added
-
-- `POSTBOX_ROOT`: the data directory now resolves as `--root` > `POSTBOX_ROOT` > `./data`, so
-  putting the binary on `PATH` is enough to run `postbox` from any folder.
-  `scripts/win-path.ps1` sets both for you.
-
-### Fixed
-
-- A relative `--root` was written into the autostart registry entry verbatim, which made the
-  login item silently do nothing. Roots are expanded to absolute paths (dropping `.`
-  segments) before being stored, and `data/autostart.vbs` now pins `POSTBOX_ROOT` as well as
-  the working directory.
-
-### Changed
-
-- Documentation: the README is now a getting-started document — architecture, the code map,
-  build-from-source notes and the MCP integration guide moved to `docs/architecture.md` and
-  `docs/agent-integration.md` (both bilingual), roughly halving its length.
-
 ## [0.1.0] — initial public release
 
 First publishable version. Everything below is what the binary does today; the
@@ -57,6 +38,23 @@ First publishable version. Everything below is what the binary does today; the
   `cargo test` on Linux/macOS/Windows. The build matrix skips pull requests, so a PR
   pays for lint and tests alone, and pushing a `v*` tag attaches all three platform
   binaries to the GitHub Release page.
+
+### Fixed
+
+- A relative `--root` was written into the autostart registry entry verbatim, so the login
+  item pointed at a relative path and silently did nothing at boot. Roots are now expanded
+  to absolute paths (dropping `.` segments) before anything reads them, and
+  `data/autostart.vbs` pins `POSTBOX_ROOT` as well as the working directory.
+
+### Changed
+
+- `POSTBOX_ROOT`: the data directory now resolves as `--root` > `POSTBOX_ROOT` > `./data`, so
+  putting the binary on `PATH` is enough to run `postbox` from any folder.
+  `scripts/win-path.ps1` sets both, which retires the per-machine `.cmd` launcher and makes
+  the plain `postbox` name work in Git Bash too.
+- Documentation: the README is now a getting-started document — architecture, the code map,
+  build-from-source notes and the MCP integration guide moved to `docs/architecture.md` and
+  `docs/agent-integration.md` (both bilingual), roughly halving its length.
 
 ### Known limitations
 
