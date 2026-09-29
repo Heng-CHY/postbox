@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main, master]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -37,7 +38,7 @@ jobs:
       - name: cargo test
         run: cargo test
 
-  release:
+  build-binaries:
     name: Build release binary (${{ matrix.os }})
     needs: [lint, test]
     # 只给真正会留下产物的运行（push / 手动）编三平台，PR 不跑，省 CI 分钟数
@@ -71,3 +72,32 @@ jobs:
             ${{ matrix.artifact }}.tar.gz
             ${{ matrix.artifact }}.zip
           if-no-files-found: warn
+
+  github-release:
+    name: Publish GitHub Release
+    needs: [build-binaries]
+    # 只有推 v* 标签才建 Release；日常 push 只留 Actions 临时产物
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: postbox-*
+          merge-multiple: true
+      - name: Create release and attach the three platforms
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          ls -l postbox-*
+          assets=$(ls postbox-*.tar.gz postbox-*.zip | tr '\n' ' ')
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            # shellcheck disable=SC2086
+            gh release upload "$GITHUB_REF_NAME" $assets --clobber
+          else
+            # shellcheck disable=SC2086
+            gh release create "$GITHUB_REF_NAME" --title "postbox $GITHUB_REF_NAME" \
+              --generate-notes $assets
+          fi

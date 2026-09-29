@@ -10,6 +10,9 @@ and send a note back — no cloud drive, no account, nothing stored on a third p
 
 **English** · [简体中文](README.zh-CN.md)
 
+[**Download**](https://github.com/Heng-CHY/postbox/releases/latest) — Windows · Linux ·
+macOS, one binary, no installer, no Rust needed
+
 ![license](https://img.shields.io/badge/license-MIT-d97757)
 ![rust](https://img.shields.io/badge/Rust-edition%202021%20%C2%B7%20MSRV%201.88-141413)
 ![runtime](https://img.shields.io/badge/one%20binary%20%2B%20cloudflared-no%20installer%2C%20no%20service-e6e3dc)
@@ -116,6 +119,47 @@ Because of that split, the phone keeps working with your agent client closed, an
 agent can publish while the tunnel is briefly down (the link updates itself).
 
 ## Quick start
+
+Two ways in: download the prebuilt binary and skip the toolchain entirely, or build from
+source.
+
+### Download a prebuilt binary
+
+Grab `postbox-windows-x86_64.zip`, `postbox-linux-x86_64.tar.gz` or
+`postbox-macos-aarch64.tar.gz` from the
+[releases page](https://github.com/Heng-CHY/postbox/releases) and unpack the single
+binary into an empty directory that will become its home — `data/` is created wherever you
+run the command, so pick a folder you intend to keep:
+
+```powershell
+cd D:\postbox
+.\postbox.exe init        # creates data\ with a random access key and ntfy topic
+New-Item -ItemType Directory -Force tools | Out-Null
+curl.exe -L -o tools\cloudflared.exe https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe
+.\postbox.exe up          # web server + tunnel; prints the public URL and pushes it
+.\postbox.exe token       # the home page URL, access key already filled in
+```
+
+`cloudflared` is Cloudflare's own binary rather than ours, so it is not inside the zip:
+one download, no account, no signup. On Linux and macOS the layout is identical — same
+`init` / `up` / `token`, with `./postbox` instead of `.\postbox.exe`.
+
+PowerShell will not run a program sitting in the current directory unless you type `.\` in
+front of it, and `postbox` is not on your `PATH`, so a bare `postbox token` fails with
+`CommandNotFoundException`. Either keep the `.\postbox.exe` form, or add the folder to
+*Settings → System → About → Advanced system settings → Environment Variables → Path* and
+every command below works as written.
+
+### The access key
+
+The home page lists every bundle you ever published, so it is gated: the phone asks for
+the access key once, then remembers it for 30 days. Run `postbox token` and you get the
+whole URL with the key already in it — open or forward that instead of the bare domain.
+Individual bundle links (`/b/<token>`) carry an unguessable token of their own and need
+no key at all, which is why a single published file can be forwarded to a colleague
+without handing them the rest of the box.
+
+### Build from source
 
 Needs a Rust toolchain — MSRV 1.88, which comes from the `zip` / `calamine` /
 `encoding_rs` dependencies, so any current stable works. `autostart` is Windows-only;

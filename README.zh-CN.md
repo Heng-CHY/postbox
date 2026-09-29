@@ -9,6 +9,9 @@
 
 [English](README.md) · **简体中文**
 
+[**下载**](https://github.com/Heng-CHY/postbox/releases/latest) — Windows · Linux ·
+macOS，单个文件、免安装、不用装 Rust
+
 ![license](https://img.shields.io/badge/license-MIT-d97757)
 ![rust](https://img.shields.io/badge/Rust-edition%202021%20%C2%B7%20MSRV%201.88-141413)
 ![runtime](https://img.shields.io/badge/一个二进制%20%2B%20cloudflared-免安装、不注册服务-e6e3dc)
@@ -107,6 +110,41 @@ agent   │  postbox mcp ──写入──▶ data/             │
 链接会自己更新。
 
 ## 快速开始
+
+两条路：直接下编译好的单个程序，不装任何工具链；或者自己从源码编。
+
+### 下载编译好的版本
+
+到 [releases 页面](https://github.com/Heng-CHY/postbox/releases) 取
+`postbox-windows-x86_64.zip`（Linux 用 `postbox-linux-x86_64.tar.gz`，Apple 芯片的 Mac 用
+`postbox-macos-aarch64.tar.gz`），把里面那一个文件解压到一个空文件夹，当作它的家——
+`data/` 会建在你执行命令的那个目录里，所以挑一个以后不打算再挪的位置：
+
+```powershell
+cd D:\postbox
+.\postbox.exe init        # 建 data\，随机生成访问密钥和 ntfy 主题
+New-Item -ItemType Directory -Force tools | Out-Null
+curl.exe -L -o tools\cloudflared.exe https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe
+.\postbox.exe up          # 网页服务 + 隧道，打印公网地址并推送到手机
+.\postbox.exe token       # 主页地址，密钥已经拼在里面
+```
+
+`cloudflared` 是 Cloudflare 自己的程序，不在我们的压缩包里，要单独下这一次——不用注册、
+不用账号。Linux 和 macOS 步骤一样，只是把 `.\postbox.exe` 换成 `./postbox`。
+
+PowerShell 不执行当前目录里的程序，除非你在前面加 `.\`；而 `postbox` 又没进 `PATH`，
+所以直接敲 `postbox token` 会报 `CommandNotFoundException`。要么一直用 `.\postbox.exe`
+这种写法，要么把这个文件夹加进「设置 → 系统 → 关于 → 高级系统设置 → 环境变量 → Path」，
+之后本文所有命令都能直接敲。
+
+### 访问密钥是干什么的
+
+主页会列出你发布过的所有文件包，所以它上了锁：手机第一次打开要输访问密钥，之后 30 天内
+浏览器自己记住。在电脑上跑 `postbox token`，拿到的就是已经把密钥拼好的完整地址——转发
+这个，别转发光秃秃的域名。单个文件的地址（`/b/<token>`）自带一串猜不到的 token，不需要
+密钥，所以把某一个文件转给同事时，不会把整个箱子一起交出去。
+
+### 从源码编译
 
 需要 Rust 工具链，MSRV 1.88——这个下限来自 `zip` / `calamine` / `encoding_rs` 几个依赖，
 所以任何当前稳定版都够。开机自启是 Windows 专属；macOS 和 Linux 跑服务、隧道、MCP 都没问题，

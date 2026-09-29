@@ -96,6 +96,22 @@ and keep the cross-links working. Anything you document must match the code toda
 if a claim is only true for Windows, say so. Update `CHANGELOG.md` under
 `Unreleased`.
 
+## Releasing
+
+Push an annotated `v*` tag and CI publishes everything: it builds Linux (x86_64), macOS
+(aarch64) and Windows (x86_64) binaries and attaches all three to a GitHub Release of the
+same name. Nothing is uploaded from a laptop by hand, and that release page is the only
+place the README points at for prebuilt binaries.
+
+```bash
+# 1. bump `version` in Cargo.toml and move CHANGELOG's Unreleased under [x.y.z], commit
+git tag -a v0.2.0 -m "v0.2.0"
+git push origin master v0.2.0        # pushing the tag is what publishes the release
+```
+
+Keep `postbox --version` and the tag in step, otherwise a bug report naming a version
+cannot be traced to a commit.
+
 ## Pull requests
 
 One coherent change per PR. Describe what breaks without it, and how you verified it

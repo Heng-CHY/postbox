@@ -6,11 +6,6 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-### Fixed
-
-- CI: the release build matrix no longer runs on pull requests, only on pushes
-  and manual dispatches, so a PR pays for lint and tests alone.
-
 ## [0.1.0] — initial public release
 
 First publishable version. Everything below is what the binary does today; the
@@ -40,7 +35,9 @@ First publishable version. Everything below is what the binary does today; the
 - `bind` config key, `postbox config <key> get`, `postbox token`, and a guard
   that refuses to silently create a second data directory in the wrong cwd.
 - Test suite (24 tests) and CI: `cargo fmt --check`, `cargo clippy -D warnings`,
-  `cargo test` on Linux/macOS/Windows, release binaries as artifacts.
+  `cargo test` on Linux/macOS/Windows. The build matrix skips pull requests, so a PR
+  pays for lint and tests alone, and pushing a `v*` tag attaches all three platform
+  binaries to the GitHub Release page.
 
 ### Known limitations
 
