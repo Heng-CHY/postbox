@@ -81,8 +81,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      # --generate-notes reads the commit/PR comparison, so the job token needs this too
-      pull-requests: read
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -97,17 +95,34 @@ jobs:
           ls -l
           assets=$(ls postbox-*.tar.gz postbox-*.zip 2>/dev/null | tr '\n' ' ')
           if [ -z "$assets" ]; then
-            echo "::error::no packaged binaries came out of download-artifact"
+            echo "::error::download-artifact produced no postbox-* files"
             exit 1
           fi
           echo "attaching: $assets"
+
+          cat > notes.md <<'MD'
+          Prebuilt binaries: Linux x86_64, macOS (Apple silicon), Windows x86_64. Each
+          archive holds one executable and nothing else — no installer, no runtime.
+
+          Unpack it into an empty folder, add Cloudflare's `cloudflared` binary next to it
+          (see the README link), then `postbox init` followed by `postbox up`. The full
+          walkthrough, the config keys and the MCP setup for agent clients are in the
+          [README](https://github.com/Heng-CHY/postbox#readme).
+          MD
+
           # shellcheck disable=SC2086
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             # shellcheck disable=SC2086
-            gh release upload "$GITHUB_REF_NAME" $assets --clobber
+            out=$(gh release upload "$GITHUB_REF_NAME" $assets --clobber 2>&1) || {
+              echo "::error::gh release upload failed: $out"
+              exit 1
+            }
           else
             # shellcheck disable=SC2086
-            gh release create "$GITHUB_REF_NAME" --title "postbox $GITHUB_REF_NAME" \
-              --generate-notes $assets
+            out=$(gh release create "$GITHUB_REF_NAME" --title "postbox $GITHUB_REF_NAME" \
+              --notes-file notes.md $assets 2>&1) || {
+              echo "::error::gh release create failed: $out"
+              exit 1
+            }
           fi
           echo "released: $(gh release view "$GITHUB_REF_NAME" --json url -q .url)"
