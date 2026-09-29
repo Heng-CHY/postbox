@@ -113,15 +113,14 @@ agent   │  postbox mcp ──写入──▶ data/             │
 
 两条路：直接下编译好的单个程序，不装任何工具链；或者自己从源码编。
 
-### 下载编译好的版本
+### 下载就能用
 
 到 [releases 页面](https://github.com/Heng-CHY/postbox/releases) 取
 `postbox-windows-x86_64.zip`（Linux 用 `postbox-linux-x86_64.tar.gz`，Apple 芯片的 Mac 用
-`postbox-macos-aarch64.tar.gz`），把里面那一个文件解压到一个空文件夹，当作它的家——
-`data/` 会建在你执行命令的那个目录里，所以挑一个以后不打算再挪的位置：
+`postbox-macos-aarch64.tar.gz`）。压缩包里就一个可执行文件，把它放进一个你打算长期使用的
+目录——`data/` 会建在你执行命令的那个目录里，那里就是它的家：
 
 ```powershell
-# 把压缩包里的 postbox.exe 放进你自己挑定的一个目录，例如：
 mkdir "$env:USERPROFILE\postbox"; cd "$env:USERPROFILE\postbox"
 
 .\postbox.exe init        # 建 data\，随机生成访问密钥和 ntfy 主题
@@ -131,41 +130,23 @@ curl.exe -L -o tools\cloudflared.exe https://github.com/cloudflare/cloudflared/r
 .\postbox.exe token       # 主页地址，密钥已经拼在里面
 ```
 
-`cloudflared` 是 Cloudflare 自己的程序，不在我们的压缩包里，要单独下这一次——不用注册、
-不用账号。Linux 和 macOS 步骤一样，只是把 `.\postbox.exe` 换成 `./postbox`。
+前面的 `.\` 不能省：Windows 不执行当前目录里没加 `.\` 的程序。`cloudflared` 是 Cloudflare
+自己的程序，不在压缩包里，单独下这一次就行——不用注册、不用账号。Linux 和 macOS 把
+`.\postbox.exe` 换成 `./postbox`，cloudflared 挑对应平台的那一个。
 
-### 让 `postbox` 在任何目录都能敲
+### 可选：让它变成一句 `postbox`
 
-这里有两道坎。第一道：PowerShell 不执行当前目录里的程序，除非你在前面加 `.\`，而单个程序的
-压缩包本来也不会往 `PATH` 里写东西，所以所有人第一下都会敲 `postbox token`，然后吃一个
-`CommandNotFoundException`。第二道：就算加进了 `PATH`，`postbox` 找 `data/` 看的仍然是你
-**当前所在**的目录，所以在别处执行会被拦住——这是故意的，免得它悄悄另起一套空实例。
+跑一次 `scripts\win-path.ps1`，之后在任何目录敲 `postbox token` 都通。它在
+`scripts\postbox.cmd` 写一个转发脚本（这个文件被 git 忽略，因为里面装的是你机器的绝对
+路径），把 `--root` 钉死到你的数据目录，再把 `scripts` 这个文件夹加进当前用户的 `PATH`。
+不需要管理员权限；不想用了执行 `.\scripts\win-path.ps1 -Uninstall` 撤销。
 
-`scripts/win-path.ps1` 一次把两道都解决。把它拷到 `postbox.exe` 旁边，或者在仓库根目录里
-直接运行：
+Windows PowerShell 5.1、PowerShell 7 和 cmd 里都能直接敲 `postbox`；Git Bash 里命令是
+`postbox.cmd`。**改完 `PATH` 要有一个全新的环境才认**——只新开一个终端标签页往往不够，
+VS Code 这类编辑器的集成终端继承的是编辑器进程自己的环境，所以请把编辑器整个退出再打开。
 
-```powershell
-.\win-path.ps1                # 或者在仓库里：  .\scripts\win-path.ps1
-```
-
-它在 `%LOCALAPPDATA%\Programs\postbox\postbox.cmd` 写一个小转发脚本，把 `--root` 钉死到你
-的数据目录，再把那个文件夹加进**当前用户**的 `PATH`。不需要管理员权限，走的是 .NET 接口
-而不是 `setx`——`setx` 会把 `PATH` 悄悄截到 1024 个字符。跑完要**新开**一个窗口（已经开着
-的终端里还是旧 `PATH`），之后在任意目录敲 `postbox --version` 能打印出版本号就成了。不想用
-了执行 `.\win-path.ps1 -Uninstall` 撤销。
-
-不想装转发脚本，就把 exe 所在目录本身加进 `PATH`，用之前先 `cd` 进去：
-
-```powershell
-[Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path','User') + ";$PWD", 'User')
-```
-
-两种写法在 Windows PowerShell 5.1 和 PowerShell 7 里都一样。加完之后 PowerShell 和 cmd
-里都能直接敲 `postbox`；Git Bash 里要写成 `postbox.cmd`。Linux 和 macOS 没有转发脚本这一步，
-`install -m 755 ./postbox ~/.local/bin/` 之后，要么待在放着 `data/` 的目录里用，要么每次
-显式带上 `--root`。
-
-本文后面的示例一律用 `postbox …` 这种短形式，所以先把上面任选一种做完。
+Linux 和 macOS 没有这一步，`install -m 755 ./postbox ~/.local/bin/` 之后，要么待在放着
+`data/` 的目录里用，要么每次显式带 `--root`。
 
 ### 访问密钥是干什么的
 

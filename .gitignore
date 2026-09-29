@@ -1,7 +1,11 @@
+
 /target
 /data
 /tools
 /demo/image1.png
+
+# written by scripts/win-path.ps1; holds this machine's absolute paths
+/scripts/postbox.cmd
 
 # editor / OS noise
 .DS_Store

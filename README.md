@@ -123,79 +123,47 @@ agent can publish while the tunnel is briefly down (the link updates itself).
 Two ways in: download the prebuilt binary and skip the toolchain entirely, or build from
 source.
 
-### Download a prebuilt binary
+### Download and run
 
-Grab `postbox-windows-x86_64.zip`, `postbox-linux-x86_64.tar.gz` or
-`postbox-macos-aarch64.tar.gz` from the
-[releases page](https://github.com/Heng-CHY/postbox/releases) and unpack the single
-binary into an empty directory that will become its home — `data/` is created wherever you
-run the command, so pick a folder you intend to keep:
+Grab `postbox-windows-x86_64.zip` (or the Linux / macOS archive) from the
+[releases page](https://github.com/Heng-CHY/postbox/releases). Each holds one executable and
+nothing else. Unpack it into a folder you intend to keep — that folder becomes its home,
+because `data/` is created wherever you run it:
 
 ```powershell
-# Put the postbox.exe from the archive into a folder of your own, e.g.:
 mkdir "$env:USERPROFILE\postbox"; cd "$env:USERPROFILE\postbox"
 
 .\postbox.exe init        # creates data\ with a random access key and ntfy topic
 New-Item -ItemType Directory -Force tools | Out-Null
 curl.exe -L -o tools\cloudflared.exe https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe
-.\postbox.exe up          # web server + tunnel; prints the public URL and pushes it
-.\postbox.exe token       # the home page URL, access key already filled in
+.\postbox.exe up          # server + tunnel; prints the public URL and pushes it to your phone
+.\postbox.exe token       # the home page URL, access key included
 ```
 
-`cloudflared` is Cloudflare's own binary rather than ours, so it is not inside the zip:
-one download, no account, no signup. On Linux and macOS the layout is identical — same
-`init` / `up` / `token`, with `./postbox` instead of `.\postbox.exe`.
+The `.\` prefix is required: Windows refuses to run a program from the current directory
+without it. `cloudflared` is Cloudflare's binary, not ours — one download, no account, no
+signup. On Linux and macOS use `./postbox` and the matching `cloudflared` asset.
 
-### Making `postbox` runnable from anywhere
+### Optional: a plain `postbox` command
 
-Two separate things bite here. PowerShell will not run a program sitting in the current
-directory unless you prefix it with `.\`, and a single binary puts nothing on your `PATH` —
-so the first thing everyone types, `postbox token`, fails with `CommandNotFoundException`.
-And even once it is on `PATH`, `postbox` still looks for `data/` in whatever folder you are
-standing in, so running it from elsewhere refuses rather than quietly starting a second
-empty instance.
+Run `scripts/win-path.ps1` once and you can type `postbox token` from any directory. It
+writes a launcher to `scripts\postbox.cmd` (git-ignored, since it holds your machine's
+paths) that pins `--root` to your data folder, and adds that folder to your user `PATH`.
+No admin rights; `.\scripts\win-path.ps1 -Uninstall` undoes it.
 
-`scripts/win-path.ps1` settles both at once. Copy it next to `postbox.exe`, or run it from
-the repository root:
-
-```powershell
-.\win-path.ps1                # or, from a clone:  .\scripts\win-path.ps1
-```
-
-It writes a small launcher to `%LOCALAPPDATA%\Programs\postbox\postbox.cmd` that pins
-`--root` to your data directory, and adds that folder to your **user** `PATH`. No admin
-rights needed, and it goes through the .NET API rather than `setx` — `setx` silently
-truncates `PATH` to 1024 characters. Open a *new* window afterwards (already-open shells
-keep the old `PATH`); `postbox --version` from anywhere should then print a version. Undo
-with `.\win-path.ps1 -Uninstall`.
-
-Prefer no launcher? Add the folder itself to `PATH` and `cd` into it before using postbox:
-
-```powershell
-[Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path','User') + ";$PWD", 'User')
-```
-
-Both forms work the same in Windows PowerShell 5.1 and PowerShell 7. Afterwards `postbox`
-resolves in PowerShell and `cmd`; in Git Bash the launcher is typed as `postbox.cmd`. On
-Linux and macOS there is no launcher step — `install -m 755 ./postbox ~/.local/bin/` and
-then either stay in the folder holding `data/` or pass `--root` explicitly.
-
-Every snippet further down this file uses the plain `postbox …` form, so do one of these
-first.
+Applies to PowerShell 5.1, PowerShell 7 and `cmd`; in Git Bash the command is
+`postbox.cmd`. **You need a fresh environment to pick it up** — a new terminal tab is not
+enough if your editor owns the shell, so restart VS Code entirely.
 
 ### The access key
 
-The home page lists every bundle you ever published, so it is gated: the phone asks for the
-access key once, then remembers it for 30 days. The key is generated a single time by
-`init` and stored as `access_key` in `data/config.json` — it never rotates on its own, so
-read it whenever you like from that file, or with `postbox config access_key get`.
-
-What *does* change is the hostname, on every restart of `up`, because the free tunnel hands
-out a random subdomain. That is the part worth keeping a command for: `postbox token`
-prints the whole URL with the current host and the key already filled in, so forward that
-instead of the bare domain. Individual bundle links (`/b/<token>`) carry an unguessable
-token of their own and need no key at all, which is why a single published file can be
-forwarded to a colleague without handing them the rest of the box.
+The home page lists every bundle, so it asks for a key once and remembers it for 30 days.
+The key is generated by `init`, stored as `access_key` in `data/config.json`, and never
+rotates — read it there or with `postbox config access_key get`. What *does* change on every
+restart of `up` is the hostname, because the free tunnel hands out a random subdomain, which
+is exactly why `postbox token` exists: it prints host and key together. Bundle links
+(`/b/<token>`) carry an unguessable token of their own and need no key, so forwarding one
+file does not hand over the whole box.
 
 ### Build from source
 
