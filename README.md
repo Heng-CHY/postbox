@@ -144,27 +144,22 @@ The `.\` prefix is required: Windows refuses to run a program from the current d
 without it. `cloudflared` is Cloudflare's binary, not ours — one download, no account, no
 signup. On Linux and macOS use `./postbox` and the matching `cloudflared` asset.
 
-### Optional: a plain `postbox` command
+### Optional: type `postbox` from anywhere
 
-Which folder the program reads `data/` from is decided by **the folder you are standing
-in**, not the folder the binary lives in — that guard is what stops a stray `postbox init`
-from quietly creating a second key and topic you never knew about. So everything above
-already works, as long as you `cd` into your instance folder first.
+`scripts/win-path.ps1` is a one-time Windows setup script. It writes `scripts\postbox.cmd`
+— a launcher that appends `--root <your data folder>` to every call, git-ignored because it
+holds your machine's paths — and puts that folder on your user `PATH`. Afterwards
+`postbox token` works from any directory (in Git Bash the command is `postbox.cmd`). No
+admin rights; `-Uninstall` reverses it. **Restart your editor afterwards** — an integrated
+terminal inherits the editor's own environment, so a new tab is not a new shell.
 
-The launcher is for when you would rather not care. `scripts/win-path.ps1` writes
-`scripts\postbox.cmd` (git-ignored: it contains your machine's absolute paths) that appends
-`--root <your data folder>` to every call, and puts that folder on your user `PATH`. After
-that `postbox token` works from any directory in PowerShell 5.1, PowerShell 7 and `cmd`; in
-Git Bash the command is `postbox.cmd`. No admin rights, and `.\scripts\win-path.ps1
--Uninstall` takes it back.
+Skipping it is fine: just `cd` into your instance folder first. That is also why adding the
+*binary's* folder to `PATH` is not the same shortcut — `data/` resolves from where you
+stand, and in a source build the binary sits in `target\release` while `data/` is one level
+above it.
 
-Adding the *binary's* own folder to `PATH` instead does not get you the same thing: the
-command resolves, but `data/` is still looked for wherever you happen to stand — and with a
-source build the binary is in `target\release` while `data/` sits one level above it, so the
-two are never in the same folder anyway.
-
-**Take it up in a fresh environment**: a new terminal tab is not enough when your editor
-owns the shell, so restart VS Code entirely.
+On Linux and macOS there is no launcher: `install -m 755 ./postbox ~/.local/bin/`, then stay
+in the data folder or pass `--root`.
 
 ### The access key
 

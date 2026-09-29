@@ -134,28 +134,20 @@ curl.exe -L -o tools\cloudflared.exe https://github.com/cloudflare/cloudflared/r
 自己的程序，不在压缩包里，单独下这一次就行——不用注册、不用账号。Linux 和 macOS 把
 `.\postbox.exe` 换成 `./postbox`，cloudflared 挑对应平台的那一个。
 
-### 可选：让它变成一句 `postbox`
+### 可选：在任何目录敲 `postbox`
 
-程序去哪个文件夹读 `data/`，取决于**你人站在哪个目录**，而不是 exe 放在哪个目录——这么设计
-是为了拦住「在别处随手一跑，悄悄又生成一套密钥和主题」。所以上面那套本来就能一直用，只要你
-先 `cd` 进自己这套实例的目录。
+`scripts\win-path.ps1` 是一次性的 Windows 配置脚本。它在 `scripts\postbox.cmd` 写一个转发
+脚本——每次调用自动补上 `--root <你的数据目录>`，因为装的是你机器的绝对路径所以被 git 忽略
+——再把 `scripts` 这个文件夹加进当前用户的 `PATH`。之后任何目录敲 `postbox token` 都通
+（Git Bash 里命令是 `postbox.cmd`）。不需要管理员权限，`-Uninstall` 撤销。**跑完请把编辑器
+整个退出再打开**：集成终端继承的是编辑器进程自己的环境，新开一个标签页不算新环境。
 
-转发脚本是给「懒得管这件事」的情况准备的。跑一次 `scripts\win-path.ps1`，它在
-`scripts\postbox.cmd` 写一个转发脚本（被 git 忽略，因为里面是你机器的绝对路径），每次调用
-自动补上 `--root <你的数据目录>`，再把 `scripts` 这个文件夹加进当前用户的 `PATH`。之后在
-任何目录敲 `postbox token` 都通：Windows PowerShell 5.1、PowerShell 7 和 cmd 里直接可用，
-Git Bash 里命令是 `postbox.cmd`。不需要管理员权限；不想用了执行
-`.\scripts\win-path.ps1 -Uninstall` 一并撤销。
+不装它也行，先 `cd` 进你那套实例的目录就好。这也是为什么「把 exe 所在目录加进 `PATH`」不是
+同一个捷径——`data/` 按你站的目录解析，而源码构建时 exe 在 `target\release`、`data/` 在它上
+面一级的项目根。
 
-**换成「把 exe 所在目录加进 `PATH`」并不等价**：命令名是解析得动了，但 `data/` 仍然按你站的
-位置去找；何况源码构建时 exe 在 `target\release`、`data/` 在它上面一级的项目根，两者根本不
-在同一个目录。
-
-**改完要有一个全新的环境才认**：只新开一个终端标签页往往不够，VS Code 这类编辑器的集成终端
-继承的是编辑器进程自己的环境，所以请把编辑器整个退出再打开。
-
-Linux 和 macOS 没有这一步，`install -m 755 ./postbox ~/.local/bin/` 之后，要么待在放着
-`data/` 的目录里用，要么每次显式带 `--root`。
+Linux 和 macOS 没有转发脚本这一步：`install -m 755 ./postbox ~/.local/bin/`，然后待在放着
+`data/` 的目录里用，或者每次显式带 `--root`。
 
 ### 访问密钥是干什么的
 
