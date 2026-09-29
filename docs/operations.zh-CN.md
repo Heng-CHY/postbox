@@ -57,14 +57,22 @@ data/autostart.vbs         只有注册了 Windows 登录自启才会有
 
 ## 四、停止与卸载
 
-临时停（保留全部配置和数据）：
+临时停（保留全部配置和数据）。按 PID 停**这个项目**的进程：
 
-```bat
-taskkill /IM cloudflared.exe /F
-taskkill /IM postbox.exe /F   :: 也会结束 MCP 进程，客户端下次调用工具会自动重起
+```powershell
+# 哪个是网页服务？它的 CommandLine 以 " up" 结尾
+Get-CimInstance Win32_Process -Filter "Name='postbox.exe'" | Select-Object ProcessId, CommandLine
+
+Stop-Process -Id <pid> -Force        # cloudflared 是它的子进程，会一起被收掉
 ```
 
-一般不需要手动去杀隧道：`postbox.exe` 一结束，它的子进程 cloudflared 也会被收掉；`up` 收到 Ctrl+C 时同样会停掉隧道。
+只停 `up` 就够了：`cloudflared` 是它拉起的子进程，父进程一没它就跟着走；在它窗口里按
+Ctrl+C 干净退出同样会停掉隧道。
+
+**不要按进程名杀。** `taskkill /IM cloudflared.exe /F` 会把这台机器上所有 cloudflared 一起
+带走，包括别的项目的隧道；`taskkill /IM postbox.exe /F` 还会顺手结束 agent 客户端持有的 MCP
+进程。确实要单独挑出某条隧道时，先列 `Name='cloudflared.exe'` 的进程，拿命令行里的
+`--url http://127.0.0.1:<端口>` 和 `postbox config port get` 对一遍，再停那个 PID。
 
 取消开机自启：
 
@@ -76,7 +84,7 @@ postbox autostart uninstall    :: 删计划任务或 HKCU\...\Run 项 + data/aut
 
 1. 在 agent 客户端的 MCP 配置里删掉 `postbox` 那一项
 2. `postbox autostart uninstall`
-3. 结束上面两个进程
+3. 按上面说的方法，用 PID 停掉 `postbox up`
 4. 删除整个项目目录（`data/` 里的文件包和反馈一并没了；想留反馈先拷走 `data/inbox/feedback.jsonl`）
 5. 手机 ntfy 里取消订阅你的主题
 

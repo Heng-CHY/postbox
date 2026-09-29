@@ -64,15 +64,24 @@ Tick these off on a real phone:
 
 ## 4. Stop and uninstall
 
-Stop temporarily (config and data are kept):
+Stop temporarily (config and data are kept). Stop **this project's** process by PID:
 
-```bat
-taskkill /IM cloudflared.exe /F
-taskkill /IM postbox.exe /F   :: also ends the MCP process; the client respawns it on the next tool call
+```powershell
+# which one is the web service? its CommandLine ends in " up"
+Get-CimInstance Win32_Process -Filter "Name='postbox.exe'" | Select-Object ProcessId, CommandLine
+
+Stop-Process -Id <pid> -Force        # its cloudflared child is a child process, it goes too
 ```
 
-Removing the tunnel by hand is normally unnecessary — killing `postbox.exe` takes its
-child with it, and `up` also stops the tunnel on a clean Ctrl+C.
+Killing the `up` process is enough: `cloudflared` was spawned by it and dies with it, and a
+clean Ctrl+C in its window stops the tunnel as well.
+
+**Do not kill by image name.** `taskkill /IM cloudflared.exe /F` takes down every
+`cloudflared` on the machine, including tunnels belonging to other projects, and
+`taskkill /IM postbox.exe /F` also ends the MCP process the agent client owns. If you must
+single out a tunnel, list `Win32_Process` for `Name='cloudflared.exe'`, match the
+`--url http://127.0.0.1:<port>` argument against your `postbox config port get`, and stop
+that PID.
 
 Remove autostart:
 
@@ -84,7 +93,7 @@ Full uninstall, in order:
 
 1. Remove the `postbox` entry from your agent client's MCP config
 2. `postbox autostart uninstall`
-3. Kill the two processes above
+3. Stop the `postbox up` process by PID, as above
 4. Delete the project directory (bundles and feedback go with it; copy `data/inbox/feedback.jsonl` out first if you want to keep it)
 5. Unsubscribe your phone from the ntfy topic
 
