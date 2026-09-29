@@ -63,7 +63,7 @@ jobs:
       - name: Package (windows)
         if: matrix.os == 'windows-latest'
         shell: pwsh
-        run: Compress-Archive -Path target/release/postbox.exe -DestinationName ${{ matrix.artifact }}.zip
+        run: Compress-Archive -Path target/release/postbox.exe -DestinationPath ${{ matrix.artifact }}.zip
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
