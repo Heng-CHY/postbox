@@ -121,7 +121,9 @@ agent   │  postbox mcp ──写入──▶ data/             │
 `data/` 会建在你执行命令的那个目录里，所以挑一个以后不打算再挪的位置：
 
 ```powershell
-cd D:\postbox
+# 把压缩包里的 postbox.exe 放进你自己挑定的一个目录，例如：
+mkdir "$env:USERPROFILE\postbox"; cd "$env:USERPROFILE\postbox"
+
 .\postbox.exe init        # 建 data\，随机生成访问密钥和 ntfy 主题
 New-Item -ItemType Directory -Force tools | Out-Null
 curl.exe -L -o tools\cloudflared.exe https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe
@@ -134,21 +136,36 @@ curl.exe -L -o tools\cloudflared.exe https://github.com/cloudflare/cloudflared/r
 
 ### 让 `postbox` 在任何目录都能敲
 
-PowerShell 不执行当前目录里的程序，除非你在前面加 `.\`；而单个程序的压缩包本来也不会往
-`PATH` 里写东西，所以所有人第一下都会敲 `postbox token`，然后吃一个
-`CommandNotFoundException`。要么一直待在那个目录里用 `.\postbox.exe` 的写法，要么把文件夹
-加进当前用户的 `PATH`——加完要**新开**一个窗口，已经开着的终端里还是旧 `PATH`：
+这里有两道坎。第一道：PowerShell 不执行当前目录里的程序，除非你在前面加 `.\`，而单个程序的
+压缩包本来也不会往 `PATH` 里写东西，所以所有人第一下都会敲 `postbox token`，然后吃一个
+`CommandNotFoundException`。第二道：就算加进了 `PATH`，`postbox` 找 `data/` 看的仍然是你
+**当前所在**的目录，所以在别处执行会被拦住——这是故意的，免得它悄悄另起一套空实例。
+
+`scripts/win-path.ps1` 一次把两道都解决。把它拷到 `postbox.exe` 旁边，或者在仓库根目录里
+直接运行：
 
 ```powershell
-[Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path','User') + ';D:\postbox', 'User')
+.\win-path.ps1                # 或者在仓库里：  .\scripts\win-path.ps1
 ```
 
-这一行在 Windows PowerShell 5.1 和 PowerShell 7 里写法完全一样，也不需要管理员权限。
-之后 PowerShell 和 cmd 里都能直接敲 `postbox`；Git Bash 里要写成 `postbox.cmd`。
-Linux 和 macOS 用 `install -m 755 ./postbox ~/.local/bin/` 放进常规的用户路径。
+它在 `%LOCALAPPDATA%\Programs\postbox\postbox.cmd` 写一个小转发脚本，把 `--root` 钉死到你
+的数据目录，再把那个文件夹加进**当前用户**的 `PATH`。不需要管理员权限，走的是 .NET 接口
+而不是 `setx`——`setx` 会把 `PATH` 悄悄截到 1024 个字符。跑完要**新开**一个窗口（已经开着
+的终端里还是旧 `PATH`），之后在任意目录敲 `postbox --version` 能打印出版本号就成了。不想用
+了执行 `.\win-path.ps1 -Uninstall` 撤销。
 
-本文后面的示例一律用 `postbox …` 这种短形式，所以先按上面任选一种——`postbox --version`
-能打印出版本号，就说明通了。
+不想装转发脚本，就把 exe 所在目录本身加进 `PATH`，用之前先 `cd` 进去：
+
+```powershell
+[Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path','User') + ";$PWD", 'User')
+```
+
+两种写法在 Windows PowerShell 5.1 和 PowerShell 7 里都一样。加完之后 PowerShell 和 cmd
+里都能直接敲 `postbox`；Git Bash 里要写成 `postbox.cmd`。Linux 和 macOS 没有转发脚本这一步，
+`install -m 755 ./postbox ~/.local/bin/` 之后，要么待在放着 `data/` 的目录里用，要么每次
+显式带上 `--root`。
+
+本文后面的示例一律用 `postbox …` 这种短形式，所以先把上面任选一种做完。
 
 ### 访问密钥是干什么的
 
@@ -391,6 +408,7 @@ src/notify.rs   通过系统 curl 推 ntfy
 src/mcp.rs      stdio MCP server：JSON-RPC 循环 + 5 个工具定义
 demo/           测试样本：docx/xlsx/md/diff 样例和生成脚本
 docs/           运维与验收清单（中英各一份）、截图
+scripts/        win-path.ps1 —— 把 postbox 加进 PATH 并钉好 --root（Windows，免管理员）
 .github/        CI 工作流、issue 模板
 ```
 

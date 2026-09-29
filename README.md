@@ -132,7 +132,9 @@ binary into an empty directory that will become its home — `data/` is created 
 run the command, so pick a folder you intend to keep:
 
 ```powershell
-cd D:\postbox
+# Put the postbox.exe from the archive into a folder of your own, e.g.:
+mkdir "$env:USERPROFILE\postbox"; cd "$env:USERPROFILE\postbox"
+
 .\postbox.exe init        # creates data\ with a random access key and ntfy topic
 New-Item -ItemType Directory -Force tools | Out-Null
 curl.exe -L -o tools\cloudflared.exe https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe
@@ -146,23 +148,40 @@ one download, no account, no signup. On Linux and macOS the layout is identical 
 
 ### Making `postbox` runnable from anywhere
 
-PowerShell refuses to run a program sitting in the current directory unless you prefix it
-with `.\`, and a single binary installs nothing on your `PATH` — so the first thing everyone
-types, `postbox token`, fails with `CommandNotFoundException`. Either keep the
-`.\postbox.exe` form while you stay in that folder, or add the folder to your user `PATH`
-once and open a *new* window (already-open shells keep the old `PATH`):
+Two separate things bite here. PowerShell will not run a program sitting in the current
+directory unless you prefix it with `.\`, and a single binary puts nothing on your `PATH` —
+so the first thing everyone types, `postbox token`, fails with `CommandNotFoundException`.
+And even once it is on `PATH`, `postbox` still looks for `data/` in whatever folder you are
+standing in, so running it from elsewhere refuses rather than quietly starting a second
+empty instance.
+
+`scripts/win-path.ps1` settles both at once. Copy it next to `postbox.exe`, or run it from
+the repository root:
 
 ```powershell
-[Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path','User') + ';D:\postbox', 'User')
+.\win-path.ps1                # or, from a clone:  .\scripts\win-path.ps1
 ```
 
-That line is identical in Windows PowerShell 5.1 and PowerShell 7 and needs no admin
-rights. Afterwards `postbox` works in PowerShell and `cmd`; in Git Bash the same name is
-typed as `postbox.cmd`. On Linux and macOS, `install -m 755 ./postbox ~/.local/bin/` puts it
-on the usual user path.
+It writes a small launcher to `%LOCALAPPDATA%\Programs\postbox\postbox.cmd` that pins
+`--root` to your data directory, and adds that folder to your **user** `PATH`. No admin
+rights needed, and it goes through the .NET API rather than `setx` — `setx` silently
+truncates `PATH` to 1024 characters. Open a *new* window afterwards (already-open shells
+keep the old `PATH`); `postbox --version` from anywhere should then print a version. Undo
+with `.\win-path.ps1 -Uninstall`.
 
-Every snippet further down this file uses the plain `postbox …` form, so do one of the two
-first — `postbox --version` printing a version means you are set.
+Prefer no launcher? Add the folder itself to `PATH` and `cd` into it before using postbox:
+
+```powershell
+[Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path','User') + ";$PWD", 'User')
+```
+
+Both forms work the same in Windows PowerShell 5.1 and PowerShell 7. Afterwards `postbox`
+resolves in PowerShell and `cmd`; in Git Bash the launcher is typed as `postbox.cmd`. On
+Linux and macOS there is no launcher step — `install -m 755 ./postbox ~/.local/bin/` and
+then either stay in the folder holding `data/` or pass `--root` explicitly.
+
+Every snippet further down this file uses the plain `postbox …` form, so do one of these
+first.
 
 ### The access key
 
@@ -438,6 +457,7 @@ src/notify.rs   ntfy push through the system curl
 src/mcp.rs      the stdio MCP server: JSON-RPC loop + 5 tool definitions
 demo/           fixtures: sample .docx/.xlsx/.md/.diff and the script that generates them
 docs/           operations & acceptance checklist (English / 简体中文), screenshots
+scripts/        win-path.ps1 — put postbox on PATH and pin --root (Windows, no admin)
 .github/        CI workflow, issue templates
 ```
 
