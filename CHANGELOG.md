@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Documentation: the README is now a getting-started document — architecture, the code map,
+  build-from-source notes and the MCP integration guide moved to `docs/architecture.md` and
+  `docs/agent-integration.md` (both bilingual), roughly halving its length.
+
 ## [0.1.0] — initial public release
 
 First publishable version. Everything below is what the binary does today; the
