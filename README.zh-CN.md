@@ -132,17 +132,35 @@ curl.exe -L -o tools\cloudflared.exe https://github.com/cloudflare/cloudflared/r
 `cloudflared` 是 Cloudflare 自己的程序，不在我们的压缩包里，要单独下这一次——不用注册、
 不用账号。Linux 和 macOS 步骤一样，只是把 `.\postbox.exe` 换成 `./postbox`。
 
-PowerShell 不执行当前目录里的程序，除非你在前面加 `.\`；而 `postbox` 又没进 `PATH`，
-所以直接敲 `postbox token` 会报 `CommandNotFoundException`。要么一直用 `.\postbox.exe`
-这种写法，要么把这个文件夹加进「设置 → 系统 → 关于 → 高级系统设置 → 环境变量 → Path」，
-之后本文所有命令都能直接敲。
+### 让 `postbox` 在任何目录都能敲
+
+PowerShell 不执行当前目录里的程序，除非你在前面加 `.\`；而单个程序的压缩包本来也不会往
+`PATH` 里写东西，所以所有人第一下都会敲 `postbox token`，然后吃一个
+`CommandNotFoundException`。要么一直待在那个目录里用 `.\postbox.exe` 的写法，要么把文件夹
+加进当前用户的 `PATH`——加完要**新开**一个窗口，已经开着的终端里还是旧 `PATH`：
+
+```powershell
+[Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path','User') + ';D:\postbox', 'User')
+```
+
+这一行在 Windows PowerShell 5.1 和 PowerShell 7 里写法完全一样，也不需要管理员权限。
+之后 PowerShell 和 cmd 里都能直接敲 `postbox`；Git Bash 里要写成 `postbox.cmd`。
+Linux 和 macOS 用 `install -m 755 ./postbox ~/.local/bin/` 放进常规的用户路径。
+
+本文后面的示例一律用 `postbox …` 这种短形式，所以先按上面任选一种——`postbox --version`
+能打印出版本号，就说明通了。
 
 ### 访问密钥是干什么的
 
 主页会列出你发布过的所有文件包，所以它上了锁：手机第一次打开要输访问密钥，之后 30 天内
-浏览器自己记住。在电脑上跑 `postbox token`，拿到的就是已经把密钥拼好的完整地址——转发
-这个，别转发光秃秃的域名。单个文件的地址（`/b/<token>`）自带一串猜不到的 token，不需要
-密钥，所以把某一个文件转给同事时，不会把整个箱子一起交出去。
+浏览器自己记住。密钥是 `init` 那一刻生成的一次性 UUID，存在 `data/config.json` 的
+`access_key` 字段里，它自己永远不会变；想什么时候看就打开那个文件，或者敲
+`postbox config access_key get`。
+
+每次重启真正会变的是域名——免费隧道随机发一个子域名。所以值得留在手边的命令是
+`postbox token`：它把当前域名和密钥一起拼成完整地址，转发这个，别转发光秃秃的域名。
+单个文件的地址（`/b/<token>`）自带一串猜不到的 token，不需要密钥，所以把某一个文件转给
+同事时，不会把整个箱子一起交出去。
 
 ### 从源码编译
 

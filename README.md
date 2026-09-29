@@ -144,20 +144,39 @@ curl.exe -L -o tools\cloudflared.exe https://github.com/cloudflare/cloudflared/r
 one download, no account, no signup. On Linux and macOS the layout is identical — same
 `init` / `up` / `token`, with `./postbox` instead of `.\postbox.exe`.
 
-PowerShell will not run a program sitting in the current directory unless you type `.\` in
-front of it, and `postbox` is not on your `PATH`, so a bare `postbox token` fails with
-`CommandNotFoundException`. Either keep the `.\postbox.exe` form, or add the folder to
-*Settings → System → About → Advanced system settings → Environment Variables → Path* and
-every command below works as written.
+### Making `postbox` runnable from anywhere
+
+PowerShell refuses to run a program sitting in the current directory unless you prefix it
+with `.\`, and a single binary installs nothing on your `PATH` — so the first thing everyone
+types, `postbox token`, fails with `CommandNotFoundException`. Either keep the
+`.\postbox.exe` form while you stay in that folder, or add the folder to your user `PATH`
+once and open a *new* window (already-open shells keep the old `PATH`):
+
+```powershell
+[Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path','User') + ';D:\postbox', 'User')
+```
+
+That line is identical in Windows PowerShell 5.1 and PowerShell 7 and needs no admin
+rights. Afterwards `postbox` works in PowerShell and `cmd`; in Git Bash the same name is
+typed as `postbox.cmd`. On Linux and macOS, `install -m 755 ./postbox ~/.local/bin/` puts it
+on the usual user path.
+
+Every snippet further down this file uses the plain `postbox …` form, so do one of the two
+first — `postbox --version` printing a version means you are set.
 
 ### The access key
 
-The home page lists every bundle you ever published, so it is gated: the phone asks for
-the access key once, then remembers it for 30 days. Run `postbox token` and you get the
-whole URL with the key already in it — open or forward that instead of the bare domain.
-Individual bundle links (`/b/<token>`) carry an unguessable token of their own and need
-no key at all, which is why a single published file can be forwarded to a colleague
-without handing them the rest of the box.
+The home page lists every bundle you ever published, so it is gated: the phone asks for the
+access key once, then remembers it for 30 days. The key is generated a single time by
+`init` and stored as `access_key` in `data/config.json` — it never rotates on its own, so
+read it whenever you like from that file, or with `postbox config access_key get`.
+
+What *does* change is the hostname, on every restart of `up`, because the free tunnel hands
+out a random subdomain. That is the part worth keeping a command for: `postbox token`
+prints the whole URL with the current host and the key already filled in, so forward that
+instead of the bare domain. Individual bundle links (`/b/<token>`) carry an unguessable
+token of their own and need no key at all, which is why a single published file can be
+forwarded to a colleague without handing them the rest of the box.
 
 ### Build from source
 

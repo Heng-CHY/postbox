@@ -89,6 +89,9 @@ jobs:
       - name: Create release and attach the three platforms
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # This job has no actions/checkout, so there is no git remote for gh to infer
+          # the repository from — without GH_REPO every repo-scoped gh call fails fast.
+          GH_REPO: ${{ github.repository }}
         run: |
           set -uo pipefail
           echo "downloaded into $(pwd):"
