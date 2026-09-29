@@ -96,11 +96,12 @@ On the phone, install [ntfy](https://ntfy.sh) and subscribe to the topic printed
 .\postbox.exe autostart install  # keep it running after login (Windows only)
 ```
 
-**Want to type `postbox` from any folder?** Run `scripts\win-path.ps1` once — a one-time
-setup script that writes a launcher adding `--root <your data folder>` to every call and puts
-it on your `PATH` (`-Uninstall` reverses it). Skip it and just `cd` into that folder first;
-same result either way. Restart your editor afterwards: an integrated terminal inherits the
-editor's own environment, so a new tab is not a new shell.
+**Want to type `postbox` from any folder?** Run `scripts\win-path.ps1` once: it puts the
+binary's folder on your `PATH` and sets `POSTBOX_ROOT` to your data folder — the variable the
+command reads instead of `./data` (an explicit `--root` still wins). `-Uninstall` reverses
+both. Skip it and just `cd` into that folder first; same result either way. Restart your
+editor afterwards: an integrated terminal inherits the editor's own environment, so a new tab
+is not a new shell.
 
 **About the access key.** It guards the home page listing only. `init` generates it once, it
 sits in `data/config.json` as `access_key`, and it never rotates; the phone remembers it for
@@ -128,7 +129,8 @@ Everything lives in `data/config.json`. Read or set a value with
 * `base_url none` clears a stale hostname; `tunnel false` is for a LAN-only setup (then use
   `http://<pc-ip>:8712/?key=…` from your phone).
 * `data/` is the whole state of the system. Move it with `--root`, e.g.
-  `postbox --root /srv/hub up` — every client that publishes must share one root.
+  `postbox --root /srv/hub up`, or set `POSTBOX_ROOT` once so the command finds that folder
+  from anywhere. Every client that publishes must share one root.
 * `port`, `bind` and `tunnel` are read once at startup, so restart `up` after changing them.
   Everything else is re-read from disk, so a new `access_key` or `ntfy_topic` applies
   immediately (the phone still has to resubscribe to a changed topic).

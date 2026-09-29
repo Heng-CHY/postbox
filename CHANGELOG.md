@@ -6,6 +6,19 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `POSTBOX_ROOT`: the data directory now resolves as `--root` > `POSTBOX_ROOT` > `./data`, so
+  putting the binary on `PATH` is enough to run `postbox` from any folder.
+  `scripts/win-path.ps1` sets both for you.
+
+### Fixed
+
+- A relative `--root` was written into the autostart registry entry verbatim, which made the
+  login item silently do nothing. Roots are expanded to absolute paths (dropping `.`
+  segments) before being stored, and `data/autostart.vbs` now pins `POSTBOX_ROOT` as well as
+  the working directory.
+
 ### Changed
 
 - Documentation: the README is now a getting-started document — architecture, the code map,

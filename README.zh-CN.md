@@ -92,10 +92,11 @@ curl.exe -L -o tools\cloudflared.exe https://github.com/cloudflare/cloudflared/r
 .\postbox.exe autostart install  # 登录后继续跑（仅 Windows）
 ```
 
-**想在任何目录都直接敲 `postbox`？** 跑一次 `scripts\win-path.ps1`——一次性的配置脚本，
-它写一个转发脚本，每次调用自动补上 `--root <你的数据目录>`，并把这个目录加进你的 `PATH`
-（`-Uninstall` 撤销）。不跑也行，先 `cd` 进那个目录就好，结果一样。跑完请把编辑器整个
-退出再打开：集成终端继承的是编辑器进程自己的环境，新开一个标签页不算新环境。
+**想在任何目录都直接敲 `postbox`？** 跑一次 `scripts\win-path.ps1`：它把 exe 所在目录加进你
+的 `PATH`，并把 `POSTBOX_ROOT` 设成你的数据目录——命令在当前目录找不到 `data/` 时就读这个
+变量（显式写的 `--root` 优先级更高）。`-Uninstall` 把两项一起撤销。不跑也行，先 `cd` 进那个
+目录就好，结果一样。跑完请把编辑器整个退出再打开：集成终端继承的是编辑器进程自己的环境，
+新开一个标签页不算新环境。
 
 **关于访问密钥。** 它只保护首页那个列表。`init` 生成一次，存在 `data/config.json` 的
 `access_key` 字段里，永远不会自己变；手机第一次输完，浏览器记 30 天。每次重启真正会变的
@@ -122,7 +123,8 @@ curl.exe -L -o tools\cloudflared.exe https://github.com/cloudflare/cloudflared/r
 * `base_url none` 清掉过期域名；只在内网用就设 `tunnel false`，手机直接访问
   `http://<电脑内网IP>:8712/?key=…`。
 * `data/` 就是这个系统的全部状态。用全局参数 `--root` 换位置，例如
-  `postbox --root /srv/hub up`——所有会发布的客户端必须指向同一个 root。
+  `postbox --root /srv/hub up`；也可以设一次 `POSTBOX_ROOT`，让命令在任何目录都找得到它。
+  所有会发布的客户端必须指向同一个 root。
 * `port`、`bind`、`tunnel` 只在启动时读一次，改完要重启 `up`。其余都是现读盘上的，所以换了
   `access_key` 或 `ntfy_topic` 不用重启就生效（换主题后手机那边仍要重新订阅）。
 * 值写进去之前先校验，不合法的直接拒掉，不会把配置写成半坏的状态。

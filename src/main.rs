@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Component, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -40,7 +40,8 @@ fn cfg_display(cfg: &store::Config, key: &str) -> String {
     about = "远程文件寄递台：把电脑上的文件发布成手机可看、可下载、可回反馈的页面"
 )]
 struct Cli {
-    /// 数据目录（含 config.json/bundles/inbox），默认为当前目录下 data/
+    /// 数据目录（含 config.json/bundles/inbox）。默认取环境变量 POSTBOX_ROOT，
+    /// 再默认当前目录下的 data/
     #[arg(long, global = true)]
     root: Option<PathBuf>,
     #[command(subcommand)]
@@ -92,17 +93,33 @@ enum AutostartAction {
     Uninstall,
 }
 
-fn data_root() -> PathBuf {
-    std::env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join("data")
+/// 数据目录的优先级：`--root` > 环境变量 `POSTBOX_ROOT` > 当前目录下的 `data/`。
+///
+/// 相对路径一律按当前目录展开成绝对路径，并去掉 `.` 段。`autostart` 会把这条路径原样写进
+/// 注册表，而登录时的当前目录并不是仓库目录，留相对值会让自启静默失效。
+fn resolve_root(cli_root: Option<PathBuf>, env_root: Option<PathBuf>) -> PathBuf {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let raw = cli_root.or(env_root).unwrap_or_else(|| cwd.join("data"));
+    let raw = if raw.is_absolute() {
+        raw
+    } else {
+        cwd.join(raw)
+    };
+    let mut out = PathBuf::new();
+    for c in raw.components() {
+        if !matches!(c, Component::CurDir) {
+            out.push(c.as_os_str());
+        }
+    }
+    out
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let root = cli.root.clone().unwrap_or_else(data_root);
-    let root_given = cli.root.is_some();
+    let env_root = std::env::var_os("POSTBOX_ROOT").map(PathBuf::from);
+    let root_given = cli.root.is_some() || env_root.is_some();
+    let root = resolve_root(cli.root.clone(), env_root);
     // 数据目录默认按当前工作目录解析。换目录跑会静默生成一套新的密钥和 ntfy 主题，
     // 表现为「链接打不开 / 手机收不到推送」，所以这里先拦住。
     if !matches!(cli.cmd, Cmd::Init) && !root.join("config.json").exists() {
@@ -116,7 +133,8 @@ async fn main() -> Result<()> {
             bail!(
                 "当前目录下没有找到数据目录（查找: {}）。\n\
                  首次使用先运行: postbox init\n\
-                 已经初始化过就加参数: --root <那个 data 目录>（数据目录按当前工作目录解析，换目录会另起一套）",
+                 已经初始化过就加参数: --root <那个 data 目录>，或者设置环境变量 POSTBOX_ROOT\
+                 （数据目录按当前工作目录解析，换目录会另起一套）",
                 root.display()
             );
         }
@@ -269,10 +287,16 @@ async fn main() -> Result<()> {
                 AutostartAction::Install => {
                     store::load_config(&root)?;
                     let exe = std::env::current_exe()?;
-                    let dir = std::env::current_dir()?;
+                    // 登录时的工作目录不是安装目录，所以两件事都写进脚本里：数据根用
+                    // POSTBOX_ROOT 钉死，工作目录设成数据根的上一层（cloudflared 默认按
+                    // 相对路径 tools/cloudflared.exe 找）。
+                    let dir = root.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| {
+                        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+                    });
                     let script = format!(
-                        "Set ws = CreateObject(\"Wscript.Shell\")\r\nws.CurrentDirectory = \"{}\"\r\nws.Run \"\"\"{}\"\" up\", 0\r\n",
+                        "Set ws = CreateObject(\"Wscript.Shell\")\r\nws.CurrentDirectory = \"{}\"\r\nws.Environment(\"PROCESS\").Item(\"POSTBOX_ROOT\") = \"{}\"\r\nws.Run \"\"\"{}\"\" up\", 0\r\n",
                         dir.display(),
+                        root.display(),
                         exe.display()
                     );
                     std::fs::write(&vbs, script)?;
@@ -341,4 +365,54 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_root;
+    use std::path::PathBuf;
+
+    fn cwd() -> PathBuf {
+        std::env::current_dir().unwrap()
+    }
+
+    #[test]
+    fn cli_root_beats_env_root() {
+        let r = resolve_root(Some(cwd().join("cli")), Some(cwd().join("env")));
+        assert_eq!(r, cwd().join("cli"));
+    }
+
+    #[test]
+    fn env_root_is_used_when_no_flag() {
+        assert_eq!(
+            resolve_root(None, Some(cwd().join("env"))),
+            cwd().join("env")
+        );
+    }
+
+    #[test]
+    fn relative_roots_are_expanded_against_cwd() {
+        // autostart writes this path into the registry verbatim, so a relative value
+        // would resolve against whatever folder login happens to use.
+        assert_eq!(
+            resolve_root(Some(PathBuf::from("data")), None),
+            cwd().join("data")
+        );
+        assert_eq!(
+            resolve_root(None, Some(PathBuf::from("other/data"))),
+            cwd().join("other/data")
+        );
+    }
+
+    #[test]
+    fn dot_segments_are_dropped_from_the_expanded_root() {
+        let expected = cwd().join("data");
+        assert_eq!(resolve_root(Some(PathBuf::from(".\\data")), None), expected);
+        assert_eq!(resolve_root(Some(PathBuf::from("./data")), None), expected);
+    }
+
+    #[test]
+    fn default_root_is_data_under_cwd() {
+        assert_eq!(resolve_root(None, None), cwd().join("data"));
+    }
 }

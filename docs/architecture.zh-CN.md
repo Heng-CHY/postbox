@@ -44,13 +44,13 @@ src/tunnel.rs   拉起 cloudflared、失败时退避重启、解析域名回写 
 src/notify.rs   通过系统 curl 推 ntfy
 src/mcp.rs      stdio MCP server：JSON-RPC 循环 + 5 个工具定义
 demo/           测试样本：docx/xlsx/md/diff 样例和生成脚本
-scripts/        win-path.ps1 —— 把 postbox 加进 PATH 并钉好 --root（Windows，免管理员）
+scripts/        win-path.ps1 —— 把 postbox 加进 PATH 并设好 POSTBOX_ROOT（Windows，免管理员）
 docs/           这份文档、运维与验收清单、截图
 .github/        CI 工作流、issue 模板
 ```
 
 `data/` 和 `tools/` 是有意被 git 忽略的：一个装着你的密钥和文件，另一个是你自己下载的第三方
-二进制。`scripts/postbox.cmd` 由 `win-path.ps1` 生成，同样被忽略——里面是一台机器的绝对路径。
+二进制。
 
 克隆之后可以重新生成演示样本（纯 Python 标准库）：
 

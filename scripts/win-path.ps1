@@ -3,20 +3,21 @@
     Put `postbox` on your PATH so one command works from any folder (Windows, no admin).
 
 .DESCRIPTION
-    Writes a launcher to <项目目录>\scripts\postbox.cmd and adds that folder to your user
-    PATH. The launcher pins --root to your data directory, because postbox resolves data/
-    from the folder you are standing in — without it, running the command from elsewhere
-    would refuse rather than quietly open a second, empty instance.
+    Two user-level environment changes, nothing else:
 
-    The launcher contains your machine's absolute paths, so it is git-ignored. It goes in
-    scripts\ rather than next to postbox.exe on purpose: Windows prefers .exe over .cmd, so
-    a launcher sharing a folder with the binary would never be picked up.
+      * POSTBOX_ROOT  gets the data directory (postbox reads it before falling back to
+        ./data in the current folder, and an explicit --root still wins over it)
+      * PATH          gets the folder holding postbox.exe
+
+    Without POSTBOX_ROOT the command would only work while you sit in the instance folder,
+    and would otherwise refuse to run rather than quietly start a second, empty instance.
 
     From the repository root:   .\scripts\win-path.ps1
     Next to a downloaded exe:   .\win-path.ps1
     Undo:                       .\scripts\win-path.ps1 -Uninstall
 
-    Open a new window afterwards — already-open shells keep the old PATH.
+    Open a new window afterwards — and restart your editor if that is where you type the
+    command, because its integrated terminal inherits the editor's own environment.
 #>
 [CmdletBinding()]
 param(
@@ -31,73 +32,64 @@ function Get-UserPath {
     if ([string]::IsNullOrEmpty($v)) { @() } else { @($v -split ';' | Where-Object { $_ }) }
 }
 
+# The .NET API, never setx: setx silently truncates PATH to 1024 characters.
 function Set-UserPath([string[]]$Parts) {
-    # Through the .NET API, never setx: setx silently truncates PATH to 1024 characters.
     [Environment]::SetEnvironmentVariable('Path', ($Parts -join ';'), 'User')
 }
 
-# The folder the launcher lives in, derived from where this script sits.
-$ShimDir = if ((Split-Path -Leaf $PSScriptRoot) -eq 'scripts') { $PSScriptRoot }
-           else { Join-Path $PSScriptRoot 'scripts' }
-$Shim = Join-Path $ShimDir 'postbox.cmd'
-
-if ($Uninstall) {
-    if (Test-Path -LiteralPath $Shim) {
-        Remove-Item -LiteralPath $Shim -Force
-        Write-Host "deleted  $Shim"
-    } else {
-        Write-Host "nothing to delete at $Shim"
+function Find-Exe([string]$Dir) {
+    foreach ($c in (Join-Path $Dir 'postbox.exe'), (Join-Path $Dir 'target\release\postbox.exe')) {
+        if (Test-Path -LiteralPath $c) { return (Resolve-Path -LiteralPath $c).Path }
     }
-    $kept = @(Get-UserPath | Where-Object { $_ -ne $ShimDir })
-    if ($kept.Count -ne (Get-UserPath).Count) {
-        Set-UserPath $kept
-        Write-Host "removed from user PATH: $ShimDir"
-    } else {
-        Write-Host "user PATH did not contain $ShimDir"
-    }
-    Write-Host 'done. open a new window for the change to take effect.'
-    return
+    $null
 }
 
 if (-not $ExeDir) { $ExeDir = (Get-Location).ProviderPath }
+$exe = Find-Exe $ExeDir
 
-$exe = Join-Path $ExeDir 'postbox.exe'
-if (-not (Test-Path -LiteralPath $exe)) {
-    $nested = Join-Path $ExeDir 'target\release\postbox.exe'
-    if (Test-Path -LiteralPath $nested) { $exe = $nested } else { $exe = $null }
+if ($Uninstall) {
+    [Environment]::SetEnvironmentVariable('POSTBOX_ROOT', $null, 'User')
+    Write-Host 'cleared POSTBOX_ROOT'
+    if ($exe) {
+        $exeDir = Split-Path -Parent $exe
+        $parts = @(Get-UserPath)
+        $kept = @($parts | Where-Object { $_ -ne $exeDir })
+        if ($kept.Count -ne $parts.Count) {
+            Set-UserPath $kept
+            Write-Host "removed from user PATH: $exeDir"
+        } else {
+            Write-Host "user PATH did not contain $exeDir"
+        }
+    } else {
+        Write-Host "no postbox.exe under $ExeDir — clear the PATH entry by hand if it is stale"
+    }
+    Write-Host 'done. open a new window for it to take effect.'
+    return
 }
+
 if (-not $exe) {
     throw "postbox.exe not found in '$ExeDir' or in 'target\release' under it — cd into that folder, or pass -ExeDir"
 }
-$exe = (Resolve-Path -LiteralPath $exe).Path
 
-# A source build puts the binary in target\release, two levels below the project folder
-# that holds data/; a downloaded release puts both in the same folder.
 $exeDir = Split-Path -Parent $exe
+# A source build keeps the binary in target\release, with data/ one level above target\.
 $isTargetBuild = (Split-Path -Leaf $exeDir) -eq 'release' -and
                  (Split-Path -Leaf (Split-Path -Parent $exeDir)) -eq 'target'
 $ProjectDir = if ($isTargetBuild) { Split-Path -Parent (Split-Path -Parent $exeDir) } else { $exeDir }
 $Root = Join-Path $ProjectDir 'data'
 
-if (-not (Test-Path -LiteralPath $ShimDir)) {
-    New-Item -ItemType Directory -Path $ShimDir | Out-Null
-}
-Set-Content -LiteralPath $Shim -Encoding Default -Value @(
-    '@echo off',
-    "`"$exe`" --root `"$Root`" %*"
-)
+[Environment]::SetEnvironmentVariable('POSTBOX_ROOT', $Root, 'User')
+Write-Host "POSTBOX_ROOT = $Root"
 
 $parts = @(Get-UserPath)
-if ($parts -contains $ShimDir) {
-    Write-Host "user PATH already contains $ShimDir"
+if ($parts -contains $exeDir) {
+    Write-Host "user PATH already contains $exeDir"
 } else {
-    Set-UserPath ($parts + $ShimDir)
-    Write-Host "added to user PATH: $ShimDir"
+    Set-UserPath ($parts + $exeDir)
+    Write-Host "added to user PATH: $exeDir"
 }
 
 Write-Host ''
-Write-Host "launcher : $Shim"
-Write-Host "  binary : $exe"
-Write-Host "  data   : $Root"
+Write-Host "binary   : $exe"
 Write-Host ''
-Write-Host 'now open a NEW PowerShell window and run:  postbox --version'
+Write-Host 'now open a NEW window (and restart your editor) and run:  postbox --version'
