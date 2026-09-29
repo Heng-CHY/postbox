@@ -407,8 +407,10 @@ mod tests {
     #[test]
     fn dot_segments_are_dropped_from_the_expanded_root() {
         let expected = cwd().join("data");
-        assert_eq!(resolve_root(Some(PathBuf::from(".\\data")), None), expected);
         assert_eq!(resolve_root(Some(PathBuf::from("./data")), None), expected);
+        // `.\data` is what a Windows user types; the backslash is only a separator there.
+        #[cfg(windows)]
+        assert_eq!(resolve_root(Some(PathBuf::from(".\\data")), None), expected);
     }
 
     #[test]
