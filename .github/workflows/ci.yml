@@ -81,6 +81,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # --generate-notes reads the commit/PR comparison, so the job token needs this too
+      pull-requests: read
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -90,9 +92,16 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -euo pipefail
-          ls -l postbox-*
-          assets=$(ls postbox-*.tar.gz postbox-*.zip | tr '\n' ' ')
+          set -uo pipefail
+          echo "downloaded into $(pwd):"
+          ls -l
+          assets=$(ls postbox-*.tar.gz postbox-*.zip 2>/dev/null | tr '\n' ' ')
+          if [ -z "$assets" ]; then
+            echo "::error::no packaged binaries came out of download-artifact"
+            exit 1
+          fi
+          echo "attaching: $assets"
+          # shellcheck disable=SC2086
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             # shellcheck disable=SC2086
             gh release upload "$GITHUB_REF_NAME" $assets --clobber
@@ -101,3 +110,4 @@ jobs:
             gh release create "$GITHUB_REF_NAME" --title "postbox $GITHUB_REF_NAME" \
               --generate-notes $assets
           fi
+          echo "released: $(gh release view "$GITHUB_REF_NAME" --json url -q .url)"
