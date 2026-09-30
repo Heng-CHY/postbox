@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>带图的报告</title>
+<style>
+  body { font-family: system-ui, sans-serif; color: #2b2926; margin: 20px; }
+  h1 { font-size: 20px; }
+  figure { margin: 18px 0; }
+  figcaption { color: #8a867e; font-size: 13px; margin-top: 6px; }
+  .ok { color: #b3603f; font-weight: 600; }
+</style>
+</head>
+<body>
+  <h1>带图的报告</h1>
+  <p>下面这张图在磁盘上是同级的 <code>图表.svg</code>，报告里写的是相对路径。
+     寄递台在送出前会把它内联成 <code>data:</code>，所以沙箱里也能显示。</p>
+  <figure>
+    <img src="图表.svg" alt="季度收支对比" width="220" height="120">
+    <figcaption>图 1 · 相对路径引用的同级文件</figcaption>
+  </figure>
+  <p class="ok">如果这句话是橙色的，说明内联样式也生效了。</p>
+  <script>document.body.insertAdjacentHTML("beforeend", "<p id=pwned>脚本执行了</p>");</script>
+</body>
+</html>

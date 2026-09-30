@@ -25,10 +25,19 @@ First publishable version. Everything below is what the binary does today; the
   `CSP: sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:` — scripts
   cannot run, the document gets an opaque origin so it cannot read cookies or reach the app,
   and remote subresources are blocked. Inline CSS and `data:` images still work, which is
-  what an exported report needs.
+  what an exported report needs. Because an opaque origin cannot fetch even its own folder,
+  a relative `src="chart.png"` is rewritten to a `data:` URI on the way out when that file
+  is part of the same bundle (2 MB per resource, 8 MB per document).
 - CSV / TSV preview: RFC 4180 parsing (quoted fields, delimiters and newlines inside quotes,
   doubled quotes) rendered as a table, first row as the header, capped at 500 rows × 40
   columns like the Office previews.
+- JSON preview: re-indented with key order preserved (`preserve_order`), falling back to the
+  raw text when the file is not one JSON document (NDJSON, JSONC, truncated exports).
+- Archive preview: `.zip` / `.jar` list their entries and sizes through the `zip` reader
+  already in use; `.tar` / `.tgz` / `.tar.gz` go through the system `tar -tf` rather than
+  adding another dependency. Capped at 200 entries with an honest "download for the rest".
+- HEIC / HEIF is recognised and explained instead of showing a broken image: no native
+  decoder is pulled in, the page says to download it and open it in the phone's gallery.
 - Feedback inbox at `data/inbox/feedback.jsonl`, readable with `postbox inbox`
   or the `check_inbox` MCP tool; the file rotates itself when it passes 4 MB.
 - `postbox mcp` — hand-written stdio MCP server (JSON-RPC 2.0, no SDK) with

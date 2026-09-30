@@ -111,6 +111,9 @@ enum Kind {
     Sheet,
     Html,
     Csv,
+    Json,
+    Archive,
+    Heic,
     Binary,
 }
 
@@ -124,13 +127,17 @@ fn classify(name: &str) -> Kind {
         "xlsx" | "xlsm" | "xls" | "ods" => Kind::Sheet,
         "html" | "htm" | "xhtml" => Kind::Html,
         "csv" | "tsv" => Kind::Csv,
+        "json" => Kind::Json,
+        "zip" | "jar" | "tar" | "gz" | "tgz" | "bz2" | "xz" | "7z" => Kind::Archive,
+        "heic" | "heif" => Kind::Heic,
         "diff" | "patch" => Kind::Diff,
         "mp3" | "wav" | "ogg" | "m4a" | "flac" => Kind::Audio,
         "mp4" | "webm" | "mov" | "mkv" => Kind::Video,
         "rs" | "py" | "js" | "ts" | "jsx" | "tsx" | "c" | "h" | "cpp" | "hpp" | "go" | "java"
-        | "rb" | "php" | "sh" | "bat" | "ps1" | "lua" | "toml" | "yaml" | "yml" | "json"
-        | "xml" | "sql" | "css" | "gradle" | "dart" | "swift" | "kt" | "vue" | "svelte" | "ini"
-        | "cfg" => Kind::Code,
+        | "rb" | "php" | "sh" | "bat" | "ps1" | "lua" | "toml" | "yaml" | "yml" | "xml" | "sql"
+        | "css" | "gradle" | "dart" | "swift" | "kt" | "vue" | "svelte" | "ini" | "cfg" => {
+            Kind::Code
+        }
         "txt" | "log" => Kind::Text,
         _ => Kind::Binary,
     }
@@ -468,8 +475,150 @@ async fn raw_file(st: State<Arc<AppState>>, p: APath<(String, usize)>) -> Respon
 
 /// 上传的 HTML 在这里渲染：CSP 把它关进不透明源，脚本、同源访问、远程子资源全部禁用。
 /// 见 `csp_for`。
-async fn html_frame(st: State<Arc<AppState>>, p: APath<(String, usize)>) -> Response {
-    serve_file(st, p, false).await
+///
+/// 沙箱里 `'self'` 匹配不到任何东西，所以相对路径的图片没法从服务器再取一次 —— 改成在送出前
+/// 把指向同包内文件的 `src` / `href` 直接内联成 `data:` URI。CSP 本来就放行 `data:` 图片。
+async fn html_frame(
+    State(st): State<Arc<AppState>>,
+    APath((token, idx)): APath<(String, usize)>,
+) -> Response {
+    let meta = match store::load_meta(&st.root, &token) {
+        Ok(m) => m,
+        Err(_) => return not_found(),
+    };
+    let Some(f) = meta.files.get(idx) else {
+        return not_found();
+    };
+    let path = match meta.file_path(&st.root, idx) {
+        Some(p) => p,
+        None => return not_found(),
+    };
+    // 太大就不重写了，原样送出：宁可图裂，也别把内存和带宽吃掉
+    if f.size > TEXT_PREVIEW_MAX {
+        return serve_file(State(st), APath((token, idx)), false).await;
+    }
+    let Ok(bytes) = std::fs::read(&path) else {
+        return not_found();
+    };
+    let Ok(html) = String::from_utf8(bytes) else {
+        return serve_file(State(st), APath((token, idx)), false).await;
+    };
+    let mut siblings: HashMap<String, std::path::PathBuf> = HashMap::new();
+    for (i, file) in meta.files.iter().enumerate() {
+        if i == idx {
+            continue;
+        }
+        if let Some(p) = meta.file_path(&st.root, i) {
+            let name = file.name.to_lowercase();
+            // 报告里常写子目录路径，取文件名那一段也能对上
+            if let Some(base) = name.rsplit(['/', '\\']).next() {
+                siblings
+                    .entry(base.to_string())
+                    .or_insert_with(|| p.clone());
+            }
+            siblings.insert(name, p);
+        }
+    }
+    Html(inline_html_resources(&html, &siblings)).into_response()
+}
+
+/// 单个内联资源的大小上限。
+const HTML_INLINE_MAX: u64 = 2 * 1024 * 1024;
+/// 一份 HTML 里所有内联资源的总预算。
+const HTML_INLINE_TOTAL_MAX: u64 = 8 * 1024 * 1024;
+
+/// 把 `src=` / `href=` 指向同包内文件的相对路径换成 `data:` URI。
+/// 带协议、以 `/` 开头、锚点、查询串开头的都不动。
+fn inline_html_resources(html: &str, siblings: &HashMap<String, std::path::PathBuf>) -> String {
+    if siblings.is_empty() {
+        return html.to_string();
+    }
+    // 只在 ASCII 小写副本上定位，切片仍用原文，偏移量一致
+    let low = html.to_ascii_lowercase();
+    let lb = low.as_bytes();
+    let mut out = String::with_capacity(html.len());
+    let mut last = 0usize;
+    let mut i = 0usize;
+    let mut budget = HTML_INLINE_TOTAL_MAX;
+    while i < lb.len() {
+        let adv = if lb[i..].starts_with(b"src=") {
+            4
+        } else if lb[i..].starts_with(b"href=") {
+            5
+        } else {
+            i += 1;
+            continue;
+        };
+        let mut j = i + adv;
+        while j < lb.len() && matches!(lb[j], b' ' | b'\t') {
+            j += 1;
+        }
+        let quote = if j < lb.len() && matches!(lb[j], b'"' | b'\'') {
+            Some(lb[j])
+        } else {
+            None
+        };
+        let vs = j + usize::from(quote.is_some());
+        let ve = if let Some(q) = quote {
+            match lb[vs..].iter().position(|&c| c == q) {
+                Some(p) => vs + p,
+                None => break,
+            }
+        } else {
+            match lb[vs..]
+                .iter()
+                .position(|&c| matches!(c, b' ' | b'\t' | b'>' | b'\n'))
+            {
+                Some(p) => vs + p,
+                None => break,
+            }
+        };
+        if let Some(uri) = data_uri_for(&html[vs..ve], siblings, &mut budget) {
+            out.push_str(&html[last..vs]);
+            out.push_str(&uri);
+            last = ve;
+        }
+        i = ve;
+    }
+    out.push_str(&html[last..]);
+    out
+}
+
+fn data_uri_for(
+    value: &str,
+    siblings: &HashMap<String, std::path::PathBuf>,
+    budget: &mut u64,
+) -> Option<String> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let v = value.trim();
+    if v.is_empty()
+        || v.starts_with('#')
+        || v.starts_with('/')
+        || v.starts_with('?')
+        || v.starts_with("data:")
+        || v.contains("://")
+        || v.to_ascii_lowercase().starts_with("javascript:")
+    {
+        return None;
+    }
+    let bare = v.split(['?', '#']).next().unwrap_or(v);
+    let key = bare
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(bare)
+        .to_lowercase();
+    let path = siblings.get(&key)?;
+    let size = std::fs::metadata(path).ok()?.len();
+    if size > HTML_INLINE_MAX || size * 4 / 3 + 32 > *budget {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    *budget = budget.saturating_sub(size);
+    let mime = mime_guess::from_path(path)
+        .first()
+        .map(|m| m.to_string())
+        .unwrap_or_else(|| "application/octet-stream".into());
+    Some(format!("data:{mime};base64,{}", STANDARD.encode(bytes)))
 }
 
 async fn dl_file(st: State<Arc<AppState>>, p: APath<(String, usize)>) -> Response {
@@ -635,6 +784,30 @@ async fn preview_page(
                 )
             }
         }
+        Kind::Json => {
+            if f.size > TEXT_PREVIEW_MAX {
+                format!(
+                    "{head}<p class=muted>文件较大（{}），页内只适合下载后查看。</p>",
+                    store::human_size(f.size)
+                )
+            } else {
+                let Ok(bytes) = std::fs::read(&fpath) else {
+                    return not_found();
+                };
+                let text = String::from_utf8_lossy(&bytes);
+                let (pretty, note) = pretty_json(&text);
+                format!("{head}<pre>{}</pre>{note}", esc(&pretty))
+            }
+        }
+        Kind::Archive => match archive_listing(&fpath, &f.name) {
+            Ok(rows) => format!(
+                "{head}<div class=md><table><thead><tr><th>条目</th><th>大小</th></tr></thead><tbody>{rows}</tbody></table></div>"
+            ),
+            Err(msg) => format!("{head}<p class=muted>{}</p>", esc(&msg)),
+        },
+        Kind::Heic => format!(
+            "{head}<p class=muted>iPhone 拍的 HEIC 照片，浏览器基本都放不出来，这边也不打算为此引一个原生解码库。点右上「下载原文件」，存到手机后相册、微信、邮件都能直接看。</p>"
+        ),
         Kind::Binary => format!(
             "{head}<p class=muted>这种格式不适合在网页里预览，点击下载原文件，到手机后用其他应用打开或转发。</p>"
         ),
@@ -772,6 +945,96 @@ fn delimited_to_html(text: &str, delim: char) -> String {
         ));
     }
     out
+}
+
+/// 页内 JSON 预览的行数上限，超出的部分给一句实话而不是半截页面。
+const JSON_MAX_LINES: usize = 2000;
+/// 压缩包清单最多列这么多条目。
+const ARCHIVE_MAX_ENTRIES: usize = 200;
+
+/// JSON 重新缩进；解析不了就原样返回（很多 `.json` 其实是 NDJSON 或带注释的配置）。
+fn pretty_json(text: &str) -> (String, String) {
+    let value: serde_json::Value = match serde_json::from_str(text) {
+        Ok(v) => v,
+        Err(_) => return (text.trim_end().to_string(), String::new()),
+    };
+    let pretty = serde_json::to_string_pretty(&value).unwrap_or_else(|_| text.to_string());
+    let lines: Vec<&str> = pretty.lines().collect();
+    if lines.len() > JSON_MAX_LINES {
+        let mut head: String = lines[..JSON_MAX_LINES].join("\n");
+        head.push_str(&format!(
+            "\n… 共 {} 行，只渲染前 {JSON_MAX_LINES} 行，完整内容请下载原文件。",
+            lines.len()
+        ));
+        (head, String::new())
+    } else {
+        (pretty, String::new())
+    }
+}
+
+/// 列出压缩包里的条目名。zip 用现成依赖读，tar 系列交给系统的 `tar -tf`
+/// （Windows 10 起自带 bsdtar），不为此再引依赖。
+fn archive_listing(path: &std::path::Path, name: &str) -> Result<String, String> {
+    let lower = name.to_lowercase();
+    let mut rows = String::new();
+    let mut count = 0usize;
+    let mut total = 0usize;
+    let mut push = |entry: String, size: Option<u64>| {
+        if count < ARCHIVE_MAX_ENTRIES {
+            let size_cell = match size {
+                Some(s) => store::human_size(s),
+                None => "—".to_string(),
+            };
+            rows.push_str(&format!(
+                "<tr><td>{}</td><td>{}</td></tr>",
+                esc(&entry),
+                esc(&size_cell)
+            ));
+            count += 1;
+        }
+        total += 1;
+    };
+
+    if lower.ends_with(".zip") || lower.ends_with(".jar") {
+        let file = std::fs::File::open(path).map_err(|e| format!("打不开这个文件（{e}）"))?;
+        let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("不是有效的 zip（{e}）"))?;
+        for i in 0..zip.len() {
+            match zip.by_index(i) {
+                Ok(entry) => push(entry.name().to_string(), Some(entry.size())),
+                Err(_) => continue,
+            }
+        }
+    } else if [".tar", ".tgz", ".tar.gz", ".tar.bz2", ".tar.xz"]
+        .iter()
+        .any(|s| lower.ends_with(s))
+    {
+        let out = std::process::Command::new("tar")
+            .args(["-tf", &path.display().to_string()])
+            .output()
+            .map_err(|e| format!("本机没有可用的 tar（{e}）"))?;
+        if !out.status.success() {
+            return Err(
+                "这个压缩包解不开，可能是格式不支持或文件损坏。请下载后用解压工具查看。".into(),
+            );
+        }
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            if !line.trim().is_empty() {
+                push(line.to_string(), None);
+            }
+        }
+    } else {
+        return Err("这种压缩格式列不出清单，请下载后用解压工具打开。".into());
+    }
+
+    if total == 0 {
+        return Ok("<tr><td>（空）</td><td>0 B</td></tr>".to_string());
+    }
+    if total > count {
+        rows.push_str(&format!(
+            "<tr><td colspan=2>共 {total} 个条目，只列出前 {count} 个，完整清单请下载原文件。</td></tr>"
+        ));
+    }
+    Ok(rows)
 }
 
 fn render_markdown(md: &str) -> String {
@@ -960,7 +1223,8 @@ mod tests {
         assert_eq!(classify("report.HTML"), Kind::Html);
         assert_eq!(classify("data.csv"), Kind::Csv);
         assert_eq!(classify("data.tsv"), Kind::Csv);
-        assert_eq!(classify("x.zip"), Kind::Binary);
+        assert_eq!(classify("x.zip"), Kind::Archive);
+        assert_eq!(classify("x.bin"), Kind::Binary);
         assert_eq!(classify("noext"), Kind::Binary);
     }
 
@@ -1000,6 +1264,77 @@ mod tests {
         let one = split_delimited("h\n\"line1\nline2\"\n", ',');
         assert_eq!(one.len(), 2);
         assert_eq!(one[1][0], "line1\nline2");
+    }
+
+    #[test]
+    fn classify_maps_the_new_preview_types() {
+        assert_eq!(classify("x.json"), Kind::Json);
+        assert_eq!(classify("photos.HEIC"), Kind::Heic);
+        assert_eq!(classify("app.js"), Kind::Code);
+    }
+
+    #[test]
+    fn json_preview_keeps_key_order_and_indents() {
+        let (pretty, _) = pretty_json("{\"b\":1,\"a\":{\"y\":2,\"x\":[1,2]}}");
+        let at = |k: &str| pretty.find(k).unwrap();
+        assert!(
+            at("\"b\"") < at("\"a\""),
+            "key order must survive: {pretty}"
+        );
+        assert!(at("\"y\"") < at("\"x\""));
+        assert!(pretty.contains("\n  "), "should be indented");
+    }
+
+    #[test]
+    fn json_that_is_not_a_single_document_is_left_alone() {
+        // NDJSON 之类的解析不了，就原样给出，不做半截美化
+        let (pretty, _) = pretty_json("{\"a\":1}\n{\"b\":2}\n");
+        assert!(pretty.starts_with("{\"a\":1}"), "{pretty}");
+        assert!(!pretty.contains("\n  "));
+    }
+
+    #[test]
+    fn html_relative_images_are_inlined_and_others_left_alone() {
+        let dir = std::env::temp_dir().join(format!("postbox-html-{}", store::now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("chart.png"), [0x89u8, b'P', b'N', b'G']).unwrap();
+        let mut siblings = HashMap::new();
+        siblings.insert("chart.png".to_string(), dir.join("chart.png"));
+
+        let html = "<img src=\"chart.png\"><img src='/raw/x/chart.png'>\
+                    <img src=\"data:image/gif;base64,AA\"><img src=\"missing.png\">";
+        let out = inline_html_resources(html, &siblings);
+        // 只有相对路径那一条被换成 PNG 的 data URI
+        assert_eq!(out.matches("data:image/png;base64,").count(), 1, "{out}");
+        assert!(
+            out.contains("data:image/gif;base64,AA"),
+            "existing data: untouched"
+        );
+        assert!(out.contains("/raw/x/chart.png"), "absolute path untouched");
+        assert!(out.contains("missing.png"), "unknown sibling untouched");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn archive_listing_reads_zip_entries() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("postbox-zip-{}", store::now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pack.zip");
+        let mut w = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+        let opts = zip::write::SimpleFileOptions::default();
+        w.start_file("readme.md", opts).unwrap();
+        w.write_all(b"hello").unwrap();
+        w.start_file("src/main.rs", opts).unwrap();
+        w.write_all(b"fn main(){}").unwrap();
+        w.finish().unwrap();
+
+        let rows = archive_listing(&path, "pack.zip").unwrap();
+        assert!(rows.contains("readme.md"), "{rows}");
+        assert!(rows.contains("src/main.rs"));
+        // 认不出的后缀给可读说明，不 panic
+        assert!(archive_listing(&path, "x.rar").is_err());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

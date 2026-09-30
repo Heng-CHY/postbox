@@ -13,22 +13,29 @@ use anyhow::{bail, Result};
 use crate::notify;
 use crate::store::{self, Config};
 
-/// 解析 cloudflared 日志行里的公网地址
+/// 解析 cloudflared 日志行里的公网地址。
+///
+/// 只认 `https://<随机子域>.trycloudflare.com` 这种**不带路径**的形态。隧道注册失败时
+/// cloudflared 会打印 `https://api.trycloudflare.com/tunnel` 之类的接口端点，那是请求地址不是
+/// 公网域名 —— 一旦把它写进 `base_url`，所有手机链接都会指向一个返回 405 的地方。
 fn extract_url(line: &str) -> Option<String> {
     if !line.contains("trycloudflare.com") {
         return None;
     }
-    let i = line.find("https://")?;
-    let rest = &line[i..];
-    let end = rest
-        .find([' ', '"', '\r', '\n', ',', '|'])
-        .unwrap_or(rest.len());
-    let url = &rest[..end];
-    if url.ends_with("trycloudflare.com") || url.contains(".trycloudflare.com") {
-        Some(url.to_string())
-    } else {
-        None
+    let mut from = 0usize;
+    while let Some(rel) = line[from..].find("https://") {
+        let start = from + rel;
+        let rest = &line[start..];
+        let end = rest
+            .find([' ', '\'', '"', '\r', '\n', ',', '|'])
+            .unwrap_or(rest.len());
+        let host = rest["https://".len()..end].trim_end_matches('/');
+        if host.ends_with(".trycloudflare.com") && !host.contains('/') {
+            return Some(format!("https://{host}"));
+        }
+        from = start + "https://".len();
     }
+    None
 }
 
 fn tunnel_exe(cfg: &Config) -> Result<PathBuf> {
@@ -170,4 +177,46 @@ fn supervise_once(
         }
     }
     Ok(connected)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_url;
+
+    #[test]
+    fn reads_the_assigned_quick_tunnel_host() {
+        let line =
+            "2026-09-30T03:23:11Z INF +  https://avi-horn-dresses-looksmart.trycloudflare.com  +";
+        assert_eq!(
+            extract_url(line).as_deref(),
+            Some("https://avi-horn-dresses-looksmart.trycloudflare.com")
+        );
+    }
+
+    #[test]
+    fn rejects_api_endpoints_from_failure_lines() {
+        // cloudflared 注册失败时会把这行打到日志里；旧实现会把 /tunnel 端点当成公网域名
+        let line = "error  POST https://api.trycloudflare.com/tunnel 403 Forbidden";
+        assert_eq!(extract_url(line), None);
+        // 连路径都没有、但也不是随机子域的情况同样不接受带路径的形态
+        assert_eq!(
+            extract_url("see https://api.trycloudflare.com/tunnel/create"),
+            None
+        );
+    }
+
+    #[test]
+    fn keeps_scanning_after_a_rejected_candidate() {
+        let line = "failed https://api.trycloudflare.com/tunnel then registered https://odd-word-host.trycloudflare.com";
+        assert_eq!(
+            extract_url(line).as_deref(),
+            Some("https://odd-word-host.trycloudflare.com")
+        );
+    }
+
+    #[test]
+    fn ignores_unrelated_lines() {
+        assert_eq!(extract_url("INF registered tunnel connection"), None);
+        assert_eq!(extract_url("https://example.com/x.trycloudflare.com"), None);
+    }
 }

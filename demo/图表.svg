@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="220" height="120" viewBox="0 0 220 120">
+  <rect width="220" height="120" rx="10" fill="#faf9f5" stroke="#e6e3dc"/>
+  <rect x="24"  y="40" width="26" height="60" fill="#cc785c"/>
+  <rect x="70"  y="62" width="26" height="38" fill="#d9cfc0"/>
+  <rect x="116" y="28" width="26" height="72" fill="#cc785c"/>
+  <rect x="162" y="70" width="26" height="30" fill="#d9cfc0"/>
+  <text x="24" y="24" font-family="system-ui" font-size="13" fill="#8a867e">收入（橙）/ 支出（灰）</text>
+</svg>

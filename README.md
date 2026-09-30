@@ -57,7 +57,7 @@ note you type at the bottom of the page lands back in an inbox the agent can rea
 | | |
 | --- | --- |
 | **Publish** | any number of local files as one link (up to 200), plus a whole-bundle zip |
-| **Preview** | Markdown, images, PDF, audio, video, code, diffs, `.docx`, `.xlsx/.xls/.ods`, `.csv/.tsv` as tables, and `.html` reports rendered in a script-free sandbox |
+| **Preview** | Markdown, images, PDF, audio, video, code, diffs, `.docx`, `.xlsx/.xls/.ods`, `.csv/.tsv` as tables, indented `.json`, a file listing for `.zip`/`.tar.gz`, and `.html` reports rendered in a script-free sandbox |
 | **Download / forward** | correct UTF-8 filenames; the link works for anyone, no account, no app |
 | **Feedback** | a note box on the page, appended to `data/inbox/feedback.jsonl` |
 | **Expiry** | bundles self-delete (30 days by default, `--days 0` to keep forever) |
