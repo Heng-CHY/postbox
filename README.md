@@ -185,8 +185,10 @@ a 404: **[docs/agent-integration.md](docs/agent-integration.md)**.
   server only in clients and workspaces you trust.
 * **Nothing is stored on a third party.** Files stay on your disk; only bytes the phone
   actually requested cross the tunnel, and ntfy carries the link text alone.
-* Untrusted documents are parsed, not trusted: CSP + `nosniff` on every response, raw HTML in
-  Markdown neutralised, `/raw/` and `/m/` served under `sandbox; default-src 'none'`.
+* Untrusted documents are parsed, not trusted: CSP + `nosniff` on every response, raw HTML
+  and `javascript:` links in Markdown neutralised, and `/raw/`, `/m/` plus the HTML frame at
+  `/h/` served under `sandbox` so an uploaded file can run neither script nor a request back
+  to the app's own origin.
 * Bundles expire and are swept hourly; the feedback inbox is capped at 4 MB.
 
 What is by design, what to report privately, and how to harden further:

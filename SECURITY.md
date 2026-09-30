@@ -44,11 +44,13 @@ threat model. Reading it before filing an issue saves everyone time.
   Availability, not confidentiality.
 * **Feedback notes are stored in cleartext** in `data/inbox/feedback.jsonl` and are
   visible on the bundle page that the note was written from. Anyone with the note
-  box can write into it — hence the per-IP rate limit (6/minute) and the 4 MB cap
-  with rotation.
+  box can write into it — hence the rate limit (6 notes/minute per client, keyed on
+  `CF-Connecting-IP` because cloudflared makes every request arrive from 127.0.0.1) and
+  the 4 MB cap with rotation.
 * **Preview pages run your document's content.** Markdown is rendered with raw HTML
-  disabled, `.docx` is parsed into a controlled subset, and every response carries a
-  CSP; `/raw/` and `/m/` are served under `sandbox; default-src 'none'` so an
+  disabled and `javascript:` / `vbscript:` / `data:text/html` links neutralised,
+  `.docx` is parsed into a controlled subset, and every response carries a
+  CSP; `/raw/`, `/m/` and the HTML frame at `/h/` are served under `sandbox` so an
   uploaded HTML/SVG file cannot talk to the origin. Serving untrusted files to
   untrusted readers is still inherently risky — that is the product's job description.
 

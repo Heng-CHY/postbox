@@ -174,7 +174,8 @@ curl.exe -L -o tools\cloudflared.exe https://github.com/cloudflare/cloudflared/r
 * **不往第三方上传任何东西。** 文件留在你磁盘上，只有手机真正请求的字节才穿过隧道；ntfy
   只携带链接文字。
 * 不可信文档是拆开来看、不是照单全收：每个响应带 CSP 和 `nosniff`，Markdown 里的原始 HTML
-  降级成文本，`/raw/` 和 `/m/` 按 `sandbox; default-src 'none'` 投送。
+  和 `javascript:` 链接都降级成无害内容，`/raw/`、`/m/` 和渲染 HTML 的 `/h/` 一律按
+  `sandbox` 投送 —— 上传的文件既跑不了脚本，也够不到本站自己的源。
 * 文件包到期后在例行清理时删除；反馈收件箱上限 4 MB。
 
 哪些是设计如此、发现问题怎么私报、还想再加固该动哪里：**[SECURITY.md](SECURITY.md)**。
