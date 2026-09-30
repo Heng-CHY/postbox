@@ -21,6 +21,14 @@ First publishable version. Everything below is what the binary does today; the
 - Previews for Markdown, plain text, code, diffs, images, PDF, audio, video,
   `.docx` (headings / lists / tables / bold-italic-underline / links / embedded
   images) and `.xlsx` / `.xlsm` / `.xls` / `.ods`.
+- HTML preview: `.html` / `.htm` / `.xhtml` render in a dedicated `/h/` frame under
+  `CSP: sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:` — scripts
+  cannot run, the document gets an opaque origin so it cannot read cookies or reach the app,
+  and remote subresources are blocked. Inline CSS and `data:` images still work, which is
+  what an exported report needs.
+- CSV / TSV preview: RFC 4180 parsing (quoted fields, delimiters and newlines inside quotes,
+  doubled quotes) rendered as a table, first row as the header, capped at 500 rows × 40
+  columns like the Office previews.
 - Feedback inbox at `data/inbox/feedback.jsonl`, readable with `postbox inbox`
   or the `check_inbox` MCP tool; the file rotates itself when it passes 4 MB.
 - `postbox mcp` — hand-written stdio MCP server (JSON-RPC 2.0, no SDK) with
@@ -29,7 +37,7 @@ First publishable version. Everything below is what the binary does today; the
   falling back to `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`).
 - Security headers on every response: `Content-Security-Policy`,
   `X-Content-Type-Options: nosniff`, `Referrer-Policy`, and a `sandbox`
-  policy for `/raw/` and `/m/`; raw HTML inside Markdown is not executed.
+  policy for `/raw/`, `/m/` and the HTML frame at `/h/`; raw HTML inside Markdown is not executed.
 - Per-bundle expiry (`--days`, default 30) enforced both on read and by an
   hourly housekeeping task; `data/tmp/` is swept together with expired bundles.
 - `bind` config key, `postbox config <key> get`, `postbox token`, and a guard

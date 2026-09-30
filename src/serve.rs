@@ -62,9 +62,24 @@ impl AppState {
 /// 所有响应统一加的安全头。
 /// /raw 与 /m 直接吐出用户文件内容，可能被人做成 HTML/SVG 在隧道域里执行，
 /// 用 CSP sandbox 让它在顶层标签页里也跑不了脚本（被 <img> 引用时该头不生效，图片照常显示）。
+/// /h 是给上传的 HTML 报告用的：同样 sandbox，但放开内联样式和 data: 图片，
+/// 否则一份带 <style> 的报告会被渲染成没有样式的裸 DOM。
+fn csp_for(path: &str) -> &'static str {
+    if path.starts_with("/h/") {
+        "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:"
+    } else if path.starts_with("/raw/") || path.starts_with("/m/") {
+        "sandbox; default-src 'none'"
+    } else {
+        "default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; frame-src 'self'; base-uri 'none'; form-action 'self'"
+    }
+}
+
 async fn security_headers(req: Request, next: Next) -> Response {
     let path = req.uri().path();
-    let untrusted = path.starts_with("/raw/") || path.starts_with("/m/");
+    // 只有本站自己的页面允许被自己内嵌（PDF 和 HTML 预览走 iframe）；
+    // 直接吐文件内容的路由不加 SAMEORIGIN，它们本来就在沙箱源里。
+    let untrusted = path.starts_with("/raw/") || path.starts_with("/m/") || path.starts_with("/h/");
+    let csp = csp_for(path);
     let mut res = next.run(req).await;
     let h = res.headers_mut();
     let mut insert = |name: &'static str, value: &'static str| {
@@ -75,10 +90,8 @@ async fn security_headers(req: Request, next: Next) -> Response {
     };
     insert("x-content-type-options", "nosniff");
     insert("referrer-policy", "same-origin");
-    if untrusted {
-        insert("content-security-policy", "sandbox; default-src 'none'");
-    } else {
-        insert("content-security-policy", "default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; frame-src 'self'; base-uri 'none'; form-action 'self'");
+    insert("content-security-policy", csp);
+    if !untrusted {
         insert("x-frame-options", "SAMEORIGIN");
     }
     res
@@ -96,6 +109,8 @@ enum Kind {
     Text,
     Docx,
     Sheet,
+    Html,
+    Csv,
     Binary,
 }
 
@@ -107,13 +122,15 @@ fn classify(name: &str) -> Kind {
         "pdf" => Kind::Pdf,
         "docx" => Kind::Docx,
         "xlsx" | "xlsm" | "xls" | "ods" => Kind::Sheet,
+        "html" | "htm" | "xhtml" => Kind::Html,
+        "csv" | "tsv" => Kind::Csv,
         "diff" | "patch" => Kind::Diff,
         "mp3" | "wav" | "ogg" | "m4a" | "flac" => Kind::Audio,
         "mp4" | "webm" | "mov" | "mkv" => Kind::Video,
         "rs" | "py" | "js" | "ts" | "jsx" | "tsx" | "c" | "h" | "cpp" | "hpp" | "go" | "java"
         | "rb" | "php" | "sh" | "bat" | "ps1" | "lua" | "toml" | "yaml" | "yml" | "json"
-        | "xml" | "sql" | "css" | "html" | "csv" | "gradle" | "dart" | "swift" | "kt" | "vue"
-        | "svelte" | "ini" | "cfg" => Kind::Code,
+        | "xml" | "sql" | "css" | "gradle" | "dart" | "swift" | "kt" | "vue" | "svelte" | "ini"
+        | "cfg" => Kind::Code,
         "txt" | "log" => Kind::Text,
         _ => Kind::Binary,
     }
@@ -449,6 +466,12 @@ async fn raw_file(st: State<Arc<AppState>>, p: APath<(String, usize)>) -> Respon
     serve_file(st, p, false).await
 }
 
+/// 上传的 HTML 在这里渲染：CSP 把它关进不透明源，脚本、同源访问、远程子资源全部禁用。
+/// 见 `csp_for`。
+async fn html_frame(st: State<Arc<AppState>>, p: APath<(String, usize)>) -> Response {
+    serve_file(st, p, false).await
+}
+
 async fn dl_file(st: State<Arc<AppState>>, p: APath<(String, usize)>) -> Response {
     serve_file(st, p, true).await
 }
@@ -583,6 +606,35 @@ async fn preview_page(
                 }
             }
         }
+        Kind::Html => {
+            let frame = format!("/h/{token}/{idx}");
+            format!(
+                "{head}<iframe src=\"{frame}\" style=\"width:100%;height:78vh;border:1px solid var(--line);border-radius:12px;background:#fff\"></iframe>
+<p class=muted>这份 HTML 在隔离的沙箱里渲染：脚本不执行，站外图片和字体也不加载（内嵌的 <code>data:</code> 图片正常）。<a href=\"{frame}\" target=_blank rel=\"noopener\">在新窗口打开</a>，或点右上「下载原文件」看源码。</p>"
+            )
+        }
+        Kind::Csv => {
+            if f.size > TEXT_PREVIEW_MAX {
+                format!(
+                    "{head}<p class=muted>文件较大（{}），页内只适合下载后查看。</p>",
+                    store::human_size(f.size)
+                )
+            } else {
+                let Ok(bytes) = std::fs::read(&fpath) else {
+                    return not_found();
+                };
+                let text = String::from_utf8_lossy(&bytes);
+                let delim = if f.name.to_lowercase().ends_with(".tsv") {
+                    '\t'
+                } else {
+                    ','
+                };
+                format!(
+                    "{head}<div class=md>{}</div>",
+                    wrap_tables(&delimited_to_html(&text, delim))
+                )
+            }
+        }
         Kind::Binary => format!(
             "{head}<p class=muted>这种格式不适合在网页里预览，点击下载原文件，到手机后用其他应用打开或转发。</p>"
         ),
@@ -642,6 +694,86 @@ async fn preview_media(
 
 /// Markdown 渲染。原始 HTML 一律降级成正文文本，防止别人写的 .md 里夹带脚本
 /// 在我们的隧道域里执行（pulldown 自己会转义 Text 事件，所以这里不用先 esc）。
+/// 页内表格预览的上限，量级与 Word/Excel 保持一致。
+const CSV_MAX_ROWS: usize = 500;
+const CSV_MAX_COLS: usize = 40;
+
+/// RFC 4180 风格的分隔解析：引号包裹、引号内的分隔符和换行、成对引号表示一个字面引号。
+fn split_delimited(text: &str, delim: char) -> Vec<Vec<String>> {
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut row: Vec<String> = Vec::new();
+    let mut field = String::new();
+    let mut in_quotes = false;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if in_quotes {
+            if c != '"' {
+                field.push(c);
+                continue;
+            }
+            if chars.peek() == Some(&'"') {
+                chars.next();
+                field.push('"');
+            } else {
+                in_quotes = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => in_quotes = true,
+            d if d == delim => row.push(std::mem::take(&mut field)),
+            '\n' => {
+                row.push(std::mem::take(&mut field));
+                rows.push(std::mem::take(&mut row));
+            }
+            '\r' => {}
+            _ => field.push(c),
+        }
+    }
+    if !field.is_empty() || !row.is_empty() {
+        row.push(field);
+        rows.push(row);
+    }
+    rows.retain(|r| !(r.len() == 1 && r[0].trim().is_empty()));
+    rows
+}
+
+fn delimited_to_html(text: &str, delim: char) -> String {
+    let rows = split_delimited(text, delim);
+    if rows.is_empty() {
+        return "<p class=muted>没有解析出内容。</p>".to_string();
+    }
+    // 以第一行的列数为准，多退少补，避免错位
+    let width = rows[0].len().clamp(1, CSV_MAX_COLS);
+    let shown = rows.len().min(CSV_MAX_ROWS);
+    let mut out = String::from("<table><thead><tr>");
+    for col in 0..width {
+        out.push_str(&format!(
+            "<th>{}</th>",
+            esc(rows[0].get(col).map(String::as_str).unwrap_or(""))
+        ));
+    }
+    out.push_str("</tr></thead><tbody>");
+    for r in rows.iter().skip(1).take(shown.saturating_sub(1)) {
+        out.push_str("<tr>");
+        for col in 0..width {
+            out.push_str(&format!(
+                "<td>{}</td>",
+                esc(r.get(col).map(String::as_str).unwrap_or(""))
+            ));
+        }
+        out.push_str("</tr>");
+    }
+    out.push_str("</tbody></table>");
+    let truncated = rows.len() > shown || rows.iter().any(|r| r.len() > width);
+    if truncated {
+        out.push_str(&format!(
+            "<p class=muted>页内只渲染前 {width} 列，超出部分请下载原文件查看。</p>"
+        ));
+    }
+    out
+}
+
 fn render_markdown(md: &str) -> String {
     use pulldown_cmark::{html, Event, Options, Parser};
     let mut opts = Options::empty();
@@ -741,6 +873,7 @@ pub async fn serve(root: PathBuf, cfg: Config) -> anyhow::Result<()> {
         .route("/z/{token}", get(bundle_zip))
         .route("/f/{token}/{idx}", get(preview_page))
         .route("/raw/{token}/{idx}", get(raw_file))
+        .route("/h/{token}/{idx}", get(html_frame))
         .route("/d/{token}/{idx}", get(dl_file))
         .route("/m/{token}/{idx}/{name}", get(preview_media))
         .route("/api/feedback/{token}", axum::routing::post(api_feedback))
@@ -824,8 +957,60 @@ mod tests {
         assert_eq!(classify("照片.docx"), Kind::Docx);
         assert_eq!(classify("x.xlsx"), Kind::Sheet);
         assert_eq!(classify("x.pdf"), Kind::Pdf);
+        assert_eq!(classify("report.HTML"), Kind::Html);
+        assert_eq!(classify("data.csv"), Kind::Csv);
+        assert_eq!(classify("data.tsv"), Kind::Csv);
         assert_eq!(classify("x.zip"), Kind::Binary);
         assert_eq!(classify("noext"), Kind::Binary);
+    }
+
+    #[test]
+    fn html_frame_is_sandboxed_but_keeps_inline_style() {
+        // 沙箱源 + 禁脚本 + 不放站外资源，但允许内联样式和 data: 图片，
+        // 否则一份带 <style> 的报告会被渲染成裸 DOM。
+        let csp = csp_for("/h/deadbeef/0");
+        assert!(csp.starts_with("sandbox;"));
+        assert!(csp.contains("default-src 'none'"));
+        assert!(csp.contains("style-src 'unsafe-inline'"));
+        assert!(!csp.contains("allow-scripts"));
+        assert!(!csp.contains("allow-same-origin"));
+        // 首页仍走自己的源，/raw 仍然是最严的那一档
+        assert!(!csp_for("/").starts_with("sandbox;"));
+        assert_eq!(csp_for("/raw/deadbeef/0"), "sandbox; default-src 'none'");
+        assert_eq!(
+            csp_for("/m/deadbeef/0/a.png"),
+            "sandbox; default-src 'none'"
+        );
+    }
+
+    #[test]
+    fn delimited_parsing_handles_quotes_and_tsv() {
+        let rows = split_delimited("a,b\n\"x,y\",\"he said \"\"hi\"\"\"\n", ',');
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0], vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(
+            rows[1],
+            vec!["x,y".to_string(), "he said \"hi\"".to_string()]
+        );
+
+        let tsv = split_delimited("a\tb\r\nc\td\r\n", '\t');
+        assert_eq!(tsv[1], vec!["c".to_string(), "d".to_string()]);
+
+        // 引号里的换行不算行尾
+        let one = split_delimited("h\n\"line1\nline2\"\n", ',');
+        assert_eq!(one.len(), 2);
+        assert_eq!(one[1][0], "line1\nline2");
+    }
+
+    #[test]
+    fn delimited_html_escapes_cells_and_pads_ragged_rows() {
+        let html = delimited_to_html("列,值\n<script>x\n", ',');
+        assert!(html.contains("<th>列</th>"));
+        assert!(!html.contains("<script>"), "cell content must be escaped");
+        assert!(html.contains("&lt;script&gt;"));
+        // 第二行只有一列，仍按表头补齐到两列
+        let last_row = html.split("<tr>").last().unwrap();
+        assert_eq!(last_row.matches("<td>").count(), 2);
     }
 
     #[test]

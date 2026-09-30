@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>季度投放复盘</title>
+<style>
+  body { font-family: system-ui, sans-serif; color: #2b2926; margin: 24px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: #8a867e; font-size: 13px; margin-bottom: 18px; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { border: 1px solid #e6e3dc; padding: 8px 10px; text-align: left; font-size: 14px; }
+  th { background: #f2ede4; }
+  .up { color: #b3603f; font-weight: 600; }
+  .card { border: 1px solid #e6e3dc; border-radius: 12px; padding: 14px 16px; margin-top: 18px; }
+</style>
+</head>
+<body>
+  <h1>季度投放复盘</h1>
+  <p class="sub">内联样式应当生效 · 下面的脚本应当被沙箱挡掉</p>
+
+  <table>
+    <tr><th>渠道</th><th>花费</th><th>转化</th><th>结论</th></tr>
+    <tr><td>搜索</td><td>42,000</td><td>311</td><td class="up">继续加</td></tr>
+    <tr><td>信息流</td><td>28,500</td><td>64</td><td>先停</td></tr>
+    <tr><td>达人</td><td>15,000</td><td>140</td><td>观察</td></tr>
+  </table>
+
+  <div class="card">
+    <p>内嵌图片（data: URI）应当显示：</p>
+    <img alt="方块" src="data:image/svg+xml;utf8,&lt;svg xmlns='http://www.w3.org/2000/svg' width='64' height='64'&gt;&lt;rect width='64' height='64' rx='10' fill='%23cc785c'/&gt;&lt;/svg&gt;">
+    <p>外链图片（会被 CSP 拦掉，正常现象）：<img src="https://example.com/nope.png" alt="外链"></p>
+  </div>
+
+  <script>document.title = "脚本执行了"; document.body.insertAdjacentHTML("beforeend", "<p id=pwned>脚本执行了</p>");</script>
+</body>
+</html>
