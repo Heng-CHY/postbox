@@ -40,8 +40,22 @@ impl AppState {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
+        // 表太大就淘汰最旧的窗口，而不是整表清空 —— clear 会让所有人的配额瞬间归零，
+        // 等于给攻击者一个「重置限流」的开关
         if map.len() > 4096 {
-            map.clear();
+            let mut stale: Vec<String> = Vec::new();
+            for (k, (t, _)) in map.iter() {
+                if now - *t >= 60 {
+                    stale.push(k.clone());
+                }
+            }
+            if stale.is_empty() {
+                map.clear();
+            } else {
+                for k in stale {
+                    map.remove(&k);
+                }
+            }
         }
         let entry = map.entry(ip.to_string()).or_insert((now, 0));
         if now - entry.0 >= 60 {
@@ -81,6 +95,13 @@ async fn security_headers(req: Request, next: Next) -> Response {
     let untrusted = path.starts_with("/raw/") || path.starts_with("/m/") || path.starts_with("/h/");
     let csp = csp_for(path);
     let mut res = next.run(req).await;
+    // 首页正文里带着所有文件包的 token，/b/ 和 /f/ 也一样。缓存下来的话，
+    // 共用一台手机的人往后翻就能翻出来 —— 所有 HTML 一律不缓存。
+    let is_html = res
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("text/html"));
     let h = res.headers_mut();
     let mut insert = |name: &'static str, value: &'static str| {
         h.insert(
@@ -91,6 +112,9 @@ async fn security_headers(req: Request, next: Next) -> Response {
     insert("x-content-type-options", "nosniff");
     insert("referrer-policy", "same-origin");
     insert("content-security-policy", csp);
+    if is_html {
+        insert("cache-control", "no-store");
+    }
     if !untrusted {
         insert("x-frame-options", "SAMEORIGIN");
     }
@@ -118,7 +142,11 @@ enum Kind {
 }
 
 fn classify(name: &str) -> Kind {
-    let ext = name.rsplit('.').next().unwrap_or("").to_lowercase();
+    // 没有扩展名时不要把整个文件名当扩展名，否则一个叫 `json` / `csv` / `tar` 的文件会被误派
+    let ext = match name.rsplit_once('.') {
+        Some((_, e)) if !e.is_empty() && !e.contains('/') && !e.contains('\\') => e.to_lowercase(),
+        _ => String::new(),
+    };
     match ext.as_str() {
         "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" | "avif" => Kind::Image,
         "md" | "markdown" => Kind::Markdown,
@@ -367,9 +395,11 @@ fn bundle_body(st: &Arc<AppState>, meta: &BundleMeta) -> String {
             esc(&meta.note)
         )
     };
-    let fbs = store::list_feedback(&st.root, 200);
+    // 先按 token 过滤、再截断。之前是「全局最近 200 条里挑本包的」，
+    // 于是一个老包写过的意见会被新包挤出前 200 条，在它自己页面上凭空消失
+    let fbs = store::list_feedback(&st.root, usize::MAX);
     let mut fb_html = String::new();
-    for f in fbs.into_iter().filter(|f| f.token == meta.token) {
+    for f in fbs.into_iter().filter(|f| f.token == meta.token).take(10) {
         fb_html.push_str(&fb_row(
             &f.text,
             &f.title,
@@ -541,14 +571,22 @@ fn inline_html_resources(html: &str, siblings: &HashMap<String, std::path::PathB
     let mut i = 0usize;
     let mut budget = HTML_INLINE_TOTAL_MAX;
     while i < lb.len() {
-        let adv = if lb[i..].starts_with(b"src=") {
+        // 必须是真正的属性起点：`data-src=`、`xlink:href=`、`ng-src=` 这些不能碰，
+        // 否则文档里贴的 HTML 样例、组件的懒加载属性都会被改成几 MB 的 base64
+        let boundary = i == 0 || matches!(lb[i - 1], b' ' | b'\t' | b'\n' | b'\r' | b'<');
+        let adv = if !boundary {
+            0
+        } else if lb[i..].starts_with(b"src=") {
             4
         } else if lb[i..].starts_with(b"href=") {
             5
         } else {
+            0
+        };
+        if adv == 0 {
             i += 1;
             continue;
-        };
+        }
         let mut j = i + adv;
         while j < lb.len() && matches!(lb[j], b' ' | b'\t') {
             j += 1;
@@ -609,16 +647,23 @@ fn data_uri_for(
         .to_lowercase();
     let path = siblings.get(&key)?;
     let size = std::fs::metadata(path).ok()?.len();
-    if size > HTML_INLINE_MAX || size * 4 / 3 + 32 > *budget {
+    if size > HTML_INLINE_MAX {
         return None;
     }
     let bytes = std::fs::read(path).ok()?;
-    *budget = budget.saturating_sub(size);
+    let encoded = STANDARD.encode(bytes);
+    // 预算要按编码后的实际大小扣，之前用原始大小判定、又按原始大小扣减，
+    // 结果总预算能超到 1.33 倍
+    let cost = encoded.len() as u64 + 32;
+    if cost > *budget {
+        return None;
+    }
+    *budget -= cost;
     let mime = mime_guess::from_path(path)
         .first()
         .map(|m| m.to_string())
         .unwrap_or_else(|| "application/octet-stream".into());
-    Some(format!("data:{mime};base64,{}", STANDARD.encode(bytes)))
+    Some(format!("data:{mime};base64,{encoded}"))
 }
 
 async fn dl_file(st: State<Arc<AppState>>, p: APath<(String, usize)>) -> Response {
@@ -836,6 +881,8 @@ async fn preview_media(
         || name.contains('/')
         || name.contains('\\')
         || name.contains("..")
+        // Windows 上 join("C:xxx") 会丢掉前缀、按进程当前目录解析；顺带挡住 NTFS 备用流
+        || name.contains(':')
     {
         return not_found();
     }
@@ -1008,19 +1055,36 @@ fn archive_listing(path: &std::path::Path, name: &str) -> Result<String, String>
         .iter()
         .any(|s| lower.ends_with(s))
     {
-        let out = std::process::Command::new("tar")
+        let mut child = std::process::Command::new("tar")
             .args(["-tf", &path.display().to_string()])
-            .output()
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
             .map_err(|e| format!("本机没有可用的 tar（{e}）"))?;
-        if !out.status.success() {
+        // 逐行读、够了就停：一次 output() 会把上百万条目的清单整个吞进内存，
+        // 而这是 async 处理器，卡在这儿等于占死一个 worker
+        let mut seen = 0usize;
+        if let Some(stdout) = child.stdout.take() {
+            use std::io::BufRead;
+            for line in std::io::BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                seen += 1;
+                if !line.trim().is_empty() {
+                    push(line, None);
+                }
+                if seen > ARCHIVE_MAX_ENTRIES {
+                    break;
+                }
+            }
+        }
+        let status = child
+            .wait_with_output()
+            .map(|o| o.status)
+            .unwrap_or_else(|_| std::process::ExitStatus::default());
+        if total == 0 && !status.success() {
             return Err(
                 "这个压缩包解不开，可能是格式不支持或文件损坏。请下载后用解压工具查看。".into(),
             );
-        }
-        for line in String::from_utf8_lossy(&out.stdout).lines() {
-            if !line.trim().is_empty() {
-                push(line.to_string(), None);
-            }
         }
     } else {
         return Err("这种压缩格式列不出清单，请下载后用解压工具打开。".into());
@@ -1050,6 +1114,32 @@ fn render_markdown(md: &str) -> String {
         other => other,
     });
     html::push_html(&mut out, filtered);
+    neutralize_dangerous_links(&out)
+}
+
+/// pulldown-cmark 不做协议过滤，而本站页面的 CSP 允许 `'unsafe-inline'`（提示气泡要用），
+/// 所以别人写的 `.md` 里一句 `[点我](javascript:…)` 点下去就能以隧道同源跑脚本、
+/// 带着 `pb_key` 把整个文件包列表读走。这里把危险协议换成 `#`。
+fn neutralize_dangerous_links(html: &str) -> String {
+    const BAD: [&str; 3] = ["javascript:", "vbscript:", "data:text/html"];
+    let low = html.to_ascii_lowercase();
+    let mut out = String::with_capacity(html.len());
+    let mut last = 0usize;
+    let mut i = 0usize;
+    while let Some(rel) = low[i..].find("href=\"") {
+        let vs = i + rel + "href=\"".len();
+        let ve = match low[vs..].find('"') {
+            Some(p) => vs + p,
+            None => break,
+        };
+        if BAD.iter().any(|b| low[vs..ve].starts_with(b)) {
+            out.push_str(&html[last..vs]);
+            out.push('#');
+            last = ve;
+        }
+        i = ve;
+    }
+    out.push_str(&html[last..]);
     out
 }
 
@@ -1080,8 +1170,28 @@ async fn api_feedback(
     let Ok(meta) = store::load_meta(&st.root, &token) else {
         return (StatusCode::NOT_FOUND, Json(json!({"ok":false}))).into_response();
     };
-    let ip = addr.ip().to_string();
-    if !st.allow_feedback(&ip) {
+    // cloudflared 是本地反代，对端永远是 127.0.0.1：只看 addr 的话「每 IP 6 条/分钟」
+    // 会变成全站共享 6 条，谁都能把别人的配额刷光。真实来源在 CF-Connecting-IP 里，
+    // 但只有对端确实是回环时才可信 —— 直接暴露到局域网时这个头能被伪造。
+    let peer = addr.ip();
+    let real_ip = if peer.is_loopback() {
+        headers
+            .get("cf-connecting-ip")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                headers
+                    .get("x-forwarded-for")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.split(',').next().map(|x| x.trim().to_string()))
+                    .filter(|s| !s.is_empty())
+            })
+            .unwrap_or_else(|| peer.to_string())
+    } else {
+        peer.to_string()
+    };
+    if !st.allow_feedback(&real_ip) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(json!({"ok":false,"error":"提交太快，稍等一分钟再试"})),
@@ -1291,6 +1401,43 @@ mod tests {
         let (pretty, _) = pretty_json("{\"a\":1}\n{\"b\":2}\n");
         assert!(pretty.starts_with("{\"a\":1}"), "{pretty}");
         assert!(!pretty.contains("\n  "));
+    }
+
+    #[test]
+    fn markdown_neutralises_javascript_links() {
+        // 本页 CSP 允许 'unsafe-inline'（提示气泡要用），所以协议必须在这里掐掉
+        let out = render_markdown("[点我](javascript:alert(1)) [好](https://example.com)");
+        assert!(!out.contains("javascript:"), "{out}");
+        assert!(out.contains("href=\"#\""), "{out}");
+        assert!(out.contains("https://example.com"), "normal links survive");
+    }
+
+    #[test]
+    fn classify_ignores_names_without_an_extension() {
+        // 旧实现把整个文件名当扩展名，一个叫 json / csv / tar 的文件会被错派
+        assert_eq!(classify("json"), Kind::Binary);
+        assert_eq!(classify("csv"), Kind::Binary);
+        assert_eq!(classify("archive.tar.gz"), Kind::Archive);
+        assert_eq!(classify("a.b.csv"), Kind::Csv);
+        assert_eq!(classify("noext"), Kind::Binary);
+    }
+
+    #[test]
+    fn inline_only_touches_real_src_and_href_attributes() {
+        let dir = std::env::temp_dir().join(format!("postbox-boundary-{}", store::now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("chart.png"), [1u8, 2, 3]).unwrap();
+        let mut siblings = HashMap::new();
+        siblings.insert("chart.png".to_string(), dir.join("chart.png"));
+
+        let html = "<img data-src=\"chart.png\"><use xlink:href=\"chart.png\">\
+                    <img ng-src=\"chart.png\"><img src=\"chart.png\">";
+        let out = inline_html_resources(html, &siblings);
+        // 前三个是别人的属性名，不该被改；最后一个是真正的 src，应该被内联
+        assert_eq!(out.matches("data:image/png;base64,").count(), 1, "{out}");
+        assert!(out.contains("data-src=\"chart.png\""), "{out}");
+        assert!(out.contains("xlink:href=\"chart.png\""), "{out}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -1,6 +1,6 @@
 [package]
 name = "postbox"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.88"
 description = "Self-hosted file delivery desk: turn any local file into a phone-friendly link with previews, downloads and a feedback inbox, driven by an agent over MCP"

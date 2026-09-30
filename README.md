@@ -18,7 +18,7 @@ macOS, one binary, no installer, no Rust needed
 ![runtime](https://img.shields.io/badge/one%20binary%20%2B%20cloudflared-no%20installer%2C%20no%20service-e6e3dc)
 ![mcp](https://img.shields.io/badge/MCP-stdio%20server%2C%205%20tools-d97757)
 ![platform](https://img.shields.io/badge/Windows%20first%20%C2%B7%20macOS%2FLinux%20core-8a867e)
-![CI](https://img.shields.io/badge/tests-24%20unit%20%C2%B7%20CI%20on%203%20OS-cc785c)
+![CI](https://img.shields.io/badge/tests-46%20unit%20%C2%B7%20CI%20on%203%20OS-cc785c)
 
 </div>
 
@@ -209,7 +209,7 @@ What is by design, what to report privately, and how to harden further:
 * The web UI **and the CLI output** are Chinese; flags, config keys, comments and docs are
   bilingual. A locale layer is a good first contribution — see
   [`CONTRIBUTING.md`](CONTRIBUTING.md).
-* 24 unit tests and CI on three OSes, but no browser automation: what a page looks like on a
+* 46 unit tests and CI on three OSes, but no browser automation: what a page looks like on a
   real phone is still checked by hand, which is why the operations doc carries an acceptance
   checklist.
 

@@ -114,10 +114,77 @@ fn resolve_root(cli_root: Option<PathBuf>, env_root: Option<PathBuf>) -> PathBuf
     out
 }
 
+/// 校验并写入单个配置项。全部合法才落到磁盘上，非法值直接拒绝而不是写坏配置。
+fn apply_config_field(
+    cfg: &mut store::Config,
+    key: &str,
+    value: &str,
+) -> Result<(), anyhow::Error> {
+    match key {
+        "port" => {
+            let p: u16 = value.trim().parse().context("端口要是 1-65535 的数字")?;
+            if p == 0 {
+                bail!("端口不能是 0，隧道会指向一个没人监听的地址");
+            }
+            cfg.port = p;
+        }
+        "tunnel" => {
+            cfg.tunnel = match value.trim().to_ascii_lowercase().as_str() {
+                "true" | "1" | "on" | "yes" => true,
+                "false" | "0" | "off" | "no" => false,
+                other => bail!("tunnel 只能是 true/false，收到 {other:?}"),
+            };
+        }
+        "bind" => cfg.bind = value.trim().to_string(),
+        "ntfy_server" => {
+            let v = value.trim().trim_end_matches('/').to_string();
+            if !v.starts_with("http://") && !v.starts_with("https://") {
+                bail!("ntfy_server 要以 http:// 或 https:// 开头");
+            }
+            cfg.ntfy_server = v;
+        }
+        "ntfy_topic" => {
+            let v = value.trim().to_string();
+            if !v.is_empty() && !valid_topic(&v) {
+                bail!("ntfy 主题只能包含字母、数字、连字符和下划线");
+            }
+            cfg.ntfy_topic = v;
+        }
+        "cloudflared" => cfg.cloudflared = value.to_string(),
+        "base_url" => {
+            let v = value.trim().to_string();
+            if v != "none" && !v.starts_with("http://") && !v.starts_with("https://") {
+                bail!("base_url 要是以 http(s):// 开头的地址，或 none");
+            }
+            cfg.base_url = if v == "none" { None } else { Some(v) };
+        }
+        "access_key" => {
+            let v = value.trim().to_string();
+            if v.len() < 8 {
+                bail!("访问密钥太短（至少 8 个字符），否则等于没有鉴权");
+            }
+            // 密钥要原样出现在 URL 查询串和 Set-Cookie 里：带 & # 空格 或非 ASCII
+            // 会让手机侧永远 403，或者干脆写不进 Cookie 头
+            if !v
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+            {
+                bail!("访问密钥只能用 ASCII 字母、数字和 - _ .（它要出现在网址和 Cookie 里）");
+            }
+            cfg.access_key = v;
+        }
+        _ => bail!("未知配置项: {key}"),
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let env_root = std::env::var_os("POSTBOX_ROOT").map(PathBuf::from);
+    // 空字符串要当成「没设」，否则相对路径解析会变成当前目录本身
+    let env_root = std::env::var_os("POSTBOX_ROOT")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from);
     let root_given = cli.root.is_some() || env_root.is_some();
     let root = resolve_root(cli.root.clone(), env_root);
     // 数据目录默认按当前工作目录解析。换目录跑会静默生成一套新的密钥和 ntfy 主题，
@@ -225,44 +292,9 @@ async fn main() -> Result<()> {
                 println!("{v}");
                 return Ok(());
             }
-            let mut cfg = store::load_config(&root)?;
-            // 先在内存里改并校验，全部合法才落盘，避免写坏配置
-            match key.as_str() {
-                "port" => cfg.port = value.trim().parse().context("端口要是 1-65535 的数字")?,
-                "tunnel" => cfg.tunnel = matches!(value.as_str(), "true" | "1" | "on"),
-                "bind" => cfg.bind = value.trim().to_string(),
-                "ntfy_server" => {
-                    let v = value.trim().trim_end_matches('/').to_string();
-                    if !v.starts_with("http://") && !v.starts_with("https://") {
-                        bail!("ntfy_server 要以 http:// 或 https:// 开头");
-                    }
-                    cfg.ntfy_server = v;
-                }
-                "ntfy_topic" => {
-                    let v = value.trim().to_string();
-                    if !v.is_empty() && !valid_topic(&v) {
-                        bail!("ntfy 主题只能包含字母、数字、连字符和下划线");
-                    }
-                    cfg.ntfy_topic = v;
-                }
-                "cloudflared" => cfg.cloudflared = value,
-                "base_url" => {
-                    let v = value.trim().to_string();
-                    if v != "none" && !v.starts_with("http://") && !v.starts_with("https://") {
-                        bail!("base_url 要是以 http(s):// 开头的地址，或 none");
-                    }
-                    cfg.base_url = if v == "none" { None } else { Some(v) };
-                }
-                "access_key" => {
-                    let v = value.trim().to_string();
-                    if v.len() < 8 {
-                        bail!("访问密钥太短（至少 8 个字符），否则等于没有鉴权");
-                    }
-                    cfg.access_key = v;
-                }
-                _ => bail!("未知配置项: {key}"),
-            }
-            store::save_config(&root, &cfg)?;
+            // 校验和赋值都在「磁盘上的最新配置」上做，而不是先读一份快照：
+            // 隧道线程也在写 config.json，用旧快照整体覆盖会把它刚更新的 base_url 抹掉。
+            let cfg = store::update_config(&root, |cfg| apply_config_field(cfg, &key, &value))?;
             println!("已更新 {key} = {}", cfg_display(&cfg, &key));
             if matches!(key.as_str(), "port" | "bind" | "tunnel") {
                 println!("提示: 这几项要重启 postbox up 才生效");
@@ -299,7 +331,9 @@ async fn main() -> Result<()> {
                         root.display(),
                         exe.display()
                     );
-                    std::fs::write(&vbs, script)?;
+                    // wscript 按 ANSI 码页解析 .vbs，没有 BOM 时含中文的路径会整行乱码，
+                    // 表现是「注册成功但登录时什么都不发生」
+                    std::fs::write(&vbs, ["\u{feff}", &script].concat().as_bytes())?;
                     let tr = format!("wscript.exe \"{}\"", vbs.display());
                     let out = std::process::Command::new("schtasks")
                         .args([
@@ -416,5 +450,48 @@ mod tests {
     #[test]
     fn default_root_is_data_under_cwd() {
         assert_eq!(resolve_root(None, None), cwd().join("data"));
+    }
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::apply_config_field;
+    use crate::store::Config;
+
+    fn cfg() -> Config {
+        Config {
+            port: 8712,
+            access_key: "abcdefgh".into(),
+            base_url: None,
+            tunnel: true,
+            ntfy_server: "https://ntfy.sh".into(),
+            ntfy_topic: "topic".into(),
+            cloudflared: "tools/cloudflared.exe".into(),
+            bind: "0.0.0.0".into(),
+        }
+    }
+
+    #[test]
+    fn access_key_must_survive_a_url_and_a_cookie() {
+        // 带 & 的密钥会在查询串里被截断，手机侧永远 403
+        assert!(apply_config_field(&mut cfg(), "access_key", "a&b cdefg").is_err());
+        assert!(apply_config_field(&mut cfg(), "access_key", "中文密钥abcdef").is_err());
+        assert!(apply_config_field(&mut cfg(), "access_key", "short").is_err());
+        let mut c = cfg();
+        apply_config_field(&mut c, "access_key", "pb-key_1.234").unwrap();
+        assert_eq!(c.access_key, "pb-key_1.234");
+    }
+
+    #[test]
+    fn port_and_tunnel_are_checked_not_coerced() {
+        assert!(apply_config_field(&mut cfg(), "port", "0").is_err());
+        assert!(apply_config_field(&mut cfg(), "port", "70000").is_err());
+        // 旧实现把任何不是 true/1/on 的值都当成 false，打错字也静默生效
+        assert!(apply_config_field(&mut cfg(), "tunnel", "ture").is_err());
+        let mut c = cfg();
+        apply_config_field(&mut c, "tunnel", "no").unwrap();
+        assert!(!c.tunnel);
+        apply_config_field(&mut c, "tunnel", "YES").unwrap();
+        assert!(c.tunnel);
     }
 }

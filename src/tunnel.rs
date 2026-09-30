@@ -154,7 +154,10 @@ fn supervise_once(
             }
             // 每次都以磁盘上的当前配置为准，只改 base_url，
             // 否则会把期间用 CLI 改掉的端口/主题覆盖回旧快照
-            match store::update_config(root, |c| c.base_url = Some(url.clone())) {
+            match store::update_config(root, |c| {
+                c.base_url = Some(url.clone());
+                Ok(())
+            }) {
                 Ok(c) => {
                     println!("隧道就绪: {url}");
                     notify::push(

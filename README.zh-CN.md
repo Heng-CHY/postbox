@@ -17,7 +17,7 @@ macOS，单个文件、免安装、不用装 Rust
 ![runtime](https://img.shields.io/badge/一个二进制%20%2B%20cloudflared-免安装、不注册服务-e6e3dc)
 ![mcp](https://img.shields.io/badge/MCP-stdio%20server%2C%205%20个工具-d97757)
 ![platform](https://img.shields.io/badge/Windows%20优先%20%C2%B7%20macOS%2FLinux%20核心功能-8a867e)
-![CI](https://img.shields.io/badge/tests-24%20个单测%20%C2%B7%20三个系统跑%20CI-cc785c)
+![CI](https://img.shields.io/badge/tests-46%20个单测%20%C2%B7%20三个系统跑%20CI-cc785c)
 
 </div>
 

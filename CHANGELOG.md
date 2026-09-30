@@ -6,6 +6,67 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-09-30
+
+Found by reading the whole codebase end to end after the preview work landed.
+A minor bump rather than a patch because config validation got stricter.
+
+### Security
+
+- Markdown links aimed at `javascript:` / `vbscript:` / `data:text/html` are neutralised to
+  `#`. App pages allow `'unsafe-inline'` script (the toast needs it), so a hostile `.md`
+  could otherwise run script in the tunnel origin and read the whole bundle list using the
+  `pb_key` cookie.
+- Feedback rate limiting keys on the real client again. `cloudflared` is a local reverse
+  proxy, so `ConnectInfo` was always `127.0.0.1` and the 6/min budget was shared by every
+  phone — one person typing a few notes locked everyone else out. `CF-Connecting-IP` is
+  trusted only when the peer is loopback, so a LAN-exposed port cannot spoof past it.
+- The limiter evicts stale windows instead of `clear()`-ing the whole table, which had
+  turned "fill the table" into a "reset everyone's quota" switch.
+- Every HTML response now says `Cache-Control: no-store`; the home page body carries all
+  bundle tokens, and a cached copy on a shared phone could be read back later.
+- `/m/` media names reject `:` in addition to `/`, `\` and `..` — on Windows
+  `join("C:x")` silently drops the prefix and resolves against the process directory.
+
+### Fixed
+
+- A publish that failed halfway left an orphan `bundles/<token>/files/` with no
+  `meta.json`, which housekeeping skips and never deletes. The bundle directory is now
+  rolled back on any error.
+- A large `--days` overflowed the expiry arithmetic into a negative timestamp, so the
+  bundle was deleted right after its link had been pushed to the phone. Days are capped
+  and the math saturates.
+- Building the whole-bundle zip read each file fully into memory; it now streams.
+- Feedback rotation ran while the append handle was still open (rename fails on Windows,
+  so it fell back to a non-atomic rewrite) and kept "half the lines, never fewer than
+  1000", which for few-but-large rows never came under the 4 MB cap. It now closes the
+  handle first and trims by bytes.
+- `postbox config <key> <value>` wrote a stale whole-config snapshot, so a `base_url` the
+  tunnel thread had just saved could be clobbered. It now reads, modifies and writes a
+  single field.
+- `classify()` treated a whole extension-less filename as its extension, so a file
+  literally named `json`, `csv` or `tar` was routed to the wrong preview.
+- HTML resource inlining matched `data-src=`, `xlink:href=` and `ng-src=` and would splice
+  megabytes of base64 into a code sample; it now requires a real attribute boundary. The
+  budget is also accounted in encoded bytes instead of raw size (it could overrun ~1.33×).
+- `tar -tf` listings buffered the entire entry list and blocked an async worker with no
+  bound; they now stream and stop at the cap.
+- `data/autostart.vbs` is written with a UTF-8 BOM. wscript parses `.vbs` as ANSI, so an
+  installation path containing non-ASCII characters produced a login item that silently
+  did nothing.
+- An empty `POSTBOX_ROOT` is treated as unset rather than resolving the data root to the
+  current directory itself.
+- `config port 0` is rejected, and `config tunnel <typo>` now errors instead of quietly
+  meaning `false`.
+- The bundle page filters feedback by token before truncating, so an older bundle's notes
+  no longer disappear from its own page once 200 newer notes exist.
+
+### Tests
+
+- Suite grows from 24 to 46 tests: every fix above has a regression test pinning it
+  (dangerous markdown links, extension-less filenames, attribute boundaries in the HTML
+  inliner, config validation, tunnel host extraction, feedback rotation, zip streaming).
+
 ## [0.1.0] — initial public release
 
 First publishable version. Everything below is what the binary does today; the
@@ -51,7 +112,7 @@ First publishable version. Everything below is what the binary does today; the
   hourly housekeeping task; `data/tmp/` is swept together with expired bundles.
 - `bind` config key, `postbox config <key> get`, `postbox token`, and a guard
   that refuses to silently create a second data directory in the wrong cwd.
-- Test suite (24 tests) and CI: `cargo fmt --check`, `cargo clippy -D warnings`,
+- Test suite and CI: `cargo fmt --check`, `cargo clippy -D warnings`,
   `cargo test` on Linux/macOS/Windows. The build matrix skips pull requests, so a PR
   pays for lint and tests alone, and pushing a `v*` tag attaches all three platform
   binaries to the GitHub Release page.

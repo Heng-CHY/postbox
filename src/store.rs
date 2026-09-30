@@ -1,4 +1,4 @@
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -8,6 +8,8 @@ use uuid::Uuid;
 
 /// 反馈收件箱文件超过这个大小就裁掉最旧的记录，避免无限增长
 pub const FEEDBACK_MAX_BYTES: u64 = 4 * 1024 * 1024;
+/// 超过上限后保留多少字节的旧反馈（从最新往回裁）
+const FEEDBACK_KEEP_BYTES: u64 = 2 * 1024 * 1024;
 /// 单次发布允许的最大文件数
 pub const MAX_FILES_PER_BUNDLE: usize = 200;
 /// data/tmp 下的临时文件保留时长（Word 预览解出的图片、publish_text 落盘）
@@ -228,12 +230,13 @@ pub fn save_config(root: &Path, cfg: &Config) -> Result<()> {
 
 /// 读-改-写：每次都在磁盘最新内容上改单个字段。
 /// 隧道线程和 CLI 都会写配置，用旧快照整体覆盖会把对方的修改抹掉。
+/// 闭包可以返回 Err 来拒绝这次修改，此时磁盘不动。
 pub fn update_config<F>(root: &Path, f: F) -> Result<Config>
 where
-    F: FnOnce(&mut Config),
+    F: FnOnce(&mut Config) -> Result<()>,
 {
     let mut cfg = load_config(root)?;
-    f(&mut cfg);
+    f(&mut cfg)?;
     save_config(root, &cfg)?;
     Ok(cfg)
 }
@@ -279,26 +282,36 @@ pub fn publish(
 
     let mut files = Vec::new();
     let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for (i, p) in paths.iter().enumerate() {
-        let meta = std::fs::metadata(p).with_context(|| format!("找不到文件: {}", p.display()))?;
-        if !meta.is_file() {
-            bail!("只支持普通文件: {}", p.display());
+    // 复制中途失败要整个回滚：否则 bundles/<token>/files/ 里会留下一堆没有 meta.json
+    // 的孤儿文件，而例行清理读不到 meta 就跳过，永远删不掉。
+    let copied = (|| -> Result<()> {
+        for (i, p) in paths.iter().enumerate() {
+            let meta =
+                std::fs::metadata(p).with_context(|| format!("找不到文件: {}", p.display()))?;
+            if !meta.is_file() {
+                bail!("只支持普通文件: {}", p.display());
+            }
+            let name = p
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| format!("file{i}"));
+            let stored = format!("{i}_{}", sanitize_name(&name));
+            std::fs::copy(p, dir.join(&stored))?;
+            let mut entry_name = name.clone();
+            if !used.insert(entry_name.clone()) {
+                entry_name = format!("{i}_{name}");
+            }
+            files.push(FileEntry {
+                name: entry_name,
+                stored,
+                size: meta.len(),
+            });
         }
-        let name = p
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| format!("file{i}"));
-        let stored = format!("{i}_{}", sanitize_name(&name));
-        std::fs::copy(p, dir.join(&stored))?;
-        let mut entry_name = name.clone();
-        if !used.insert(entry_name.clone()) {
-            entry_name = format!("{i}_{name}");
-        }
-        files.push(FileEntry {
-            name: entry_name,
-            stored,
-            size: meta.len(),
-        });
+        Ok(())
+    })();
+    if let Err(e) = copied {
+        let _ = std::fs::remove_dir_all(bundle_dir(root, &token));
+        return Err(e);
     }
 
     let mut has_archive = false;
@@ -320,7 +333,10 @@ pub fn publish(
         note,
         created_ms: now_ms(),
         expires_ms: if days > 0 {
-            Some(now_ms() + days as i64 * 86_400_000)
+            // 不封顶的话 days 很大时这个乘法会回绕成负数，包刚发布就「已过期」被清掉，
+            // 而链接已经打印并推给了手机
+            let span = (days.min(36_500) as i64).saturating_mul(86_400_000);
+            Some(now_ms().saturating_add(span))
         } else {
             None
         },
@@ -344,12 +360,11 @@ fn write_zip(out: &Path, dir: &Path, files: &[FileEntry]) -> Result<()> {
     let opts = SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated)
         .large_file(true);
-    let mut buf = Vec::new();
     for f in files {
         zw.start_file(&f.name, opts)?;
-        buf.clear();
-        std::fs::File::open(dir.join(&f.stored))?.read_to_end(&mut buf)?;
-        zw.write_all(&buf)?;
+        // 流式拷贝：read_to_end 会让峰值内存等于包里最大的那个文件
+        let mut src = std::fs::File::open(dir.join(&f.stored))?;
+        std::io::copy(&mut src, &mut zw)?;
     }
     zw.finish()?;
     Ok(())
@@ -434,6 +449,9 @@ pub fn append_feedback(root: &Path, fb: &Feedback) -> Result<()> {
         .append(true)
         .open(&path)?;
     writeln!(f, "{}", serde_json::to_string(fb)?)?;
+    // 句柄没关掉就 rotate 的话，Windows 上 rename 到仍被打开的文件会失败，
+    // 于是退回非原子的直接写，并发提交会互相覆盖丢行
+    drop(f);
     rotate_feedback(&path);
     Ok(())
 }
@@ -449,10 +467,22 @@ fn rotate_feedback(path: &Path) {
     let Ok(text) = std::fs::read_to_string(path) else {
         return;
     };
-    let lines: Vec<&str> = text.lines().collect();
-    // 保留最近的一半，但不少于 1000 行
-    let keep = (lines.len() / 2).max(1000).min(lines.len());
-    let body = lines[lines.len() - keep..].join("\n");
+    // 按字节从最新往回裁。原先按「行数的一半但不低于 1000 行」，
+    // 对「行数少但每行很大」的收件箱永远裁不到上限，还会每次全量重写。
+    let mut kept: Vec<&str> = Vec::new();
+    let mut total = 0u64;
+    for line in text.lines().rev() {
+        total += line.len() as u64 + 1;
+        if total > FEEDBACK_KEEP_BYTES {
+            break;
+        }
+        kept.push(line);
+    }
+    if kept.is_empty() {
+        return;
+    }
+    kept.reverse();
+    let body = kept.join("\n");
     let _ = write_atomic(path, format!("{body}\n").as_bytes());
 }
 
@@ -473,6 +503,8 @@ pub fn list_feedback(root: &Path, limit: usize) -> Vec<Feedback> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // 生产代码改成流式打包后不再需要 Read，只有这里回读 zip 内容时用
+    use std::io::Read;
 
     fn tmp_root(tag: &str) -> PathBuf {
         let p = std::env::temp_dir().join(format!(
@@ -511,16 +543,27 @@ mod tests {
         let first = init_root(&root).unwrap();
         // 模拟隧道线程只改 base_url
         update_config(&root, |c| {
-            c.base_url = Some("https://example.invalid".into())
+            c.base_url = Some("https://example.invalid".into());
+            Ok(())
         })
         .unwrap();
         // 模拟 CLI 之后改 port：不应把 base_url 抹掉
-        update_config(&root, |c| c.port = 9999).unwrap();
+        update_config(&root, |c| {
+            c.port = 9999;
+            Ok(())
+        })
+        .unwrap();
         let cfg = load_config(&root).unwrap();
         assert_eq!(cfg.port, 9999);
         assert_eq!(cfg.base_url.as_deref(), Some("https://example.invalid"));
         assert_eq!(cfg.access_key, first.access_key);
         assert_eq!(cfg.bind, "0.0.0.0");
+        // 校验失败时磁盘必须保持原样
+        assert!(
+            update_config(&root, |_c| { anyhow::bail!("拒绝") }).is_err(),
+            "闭包报错要往上抛"
+        );
+        assert_eq!(load_config(&root).unwrap().port, 9999);
         std::fs::remove_dir_all(root).ok();
     }
 
