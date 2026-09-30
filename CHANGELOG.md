@@ -61,6 +61,18 @@ A minor bump rather than a patch because config validation got stricter.
 - The bundle page filters feedback by token before truncating, so an older bundle's notes
   no longer disappear from its own page once 200 newer notes exist.
 
+### Changed
+
+- Page handlers no longer do synchronous disk work on the async runtime: the home page,
+  bundle page and every preview now run their file access, Office parsing and `tar`
+  listings on a blocking thread pool, so one phone opening a large document cannot stall
+  the server for everyone else.
+- The home page no longer walks the whole `bundles/` directory on every refresh; expiry is
+  handled by the hourly sweep, by publishing, and by the per-bundle check on read.
+- A `.docx` preview is rendered once and cached beside the bundle's extracted images
+  instead of being re-parsed on every page open. The cache is a dotfile and `/m/` refuses
+  dot-prefixed names, so it is never served to a client.
+
 ### Tests
 
 - Suite grows from 24 to 46 tests: every fix above has a regression test pinning it

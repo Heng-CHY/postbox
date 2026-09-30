@@ -287,7 +287,18 @@ async fn home(
     State(st): State<Arc<AppState>>,
     headers: HeaderMap,
     Query(q): Query<std::collections::HashMap<String, String>>,
-) -> impl IntoResponse {
+) -> Response {
+    match tokio::task::spawn_blocking(move || home_body(&st, headers, q)).await {
+        Ok(res) => res,
+        Err(_) => internal_error(),
+    }
+}
+
+fn home_body(
+    st: &Arc<AppState>,
+    headers: HeaderMap,
+    q: std::collections::HashMap<String, String>,
+) -> Response {
     let key = q
         .get("key")
         .cloned()
@@ -298,7 +309,8 @@ async fn home(
         let body = r#"<h1>访问验证</h1><div class=card><form onsubmit="location='/?key='+encodeURIComponent(document.getElementById('k').value);return false"><input id=k type=password placeholder="访问密钥" style="width:100%;padding:10px;border:1px solid var(--line);border-radius:8px;font:inherit"><button class=btn style="margin-top:10px">进入</button></form><p class=muted>密钥在电脑上运行 <code>postbox token</code> 可以看到。</p></div>"#;
         return (StatusCode::OK, Html(page("访问验证", body))).into_response();
     }
-    store::cleanup_expired(&st.root);
+    // 不在每次打开首页时全目录扫描清理：那是同步遍历，手机刷新一下就得一遍。
+    // 过期包由每小时的例行清理和发布时的清理兜住，读取单包时也各自校验有效期。
     let bundles = store::list_bundles(&st.root);
     let mut rows = String::new();
     if bundles.is_empty() {
@@ -443,10 +455,17 @@ async function send(){{
 }
 
 async fn bundle_page(State(st): State<Arc<AppState>>, APath(token): APath<String>) -> Response {
-    match store::load_meta(&st.root, &token) {
-        Ok(meta) => Html(page(&meta.title, &bundle_body(&st, &meta))).into_response(),
-        Err(_) => not_found(),
+    match tokio::task::spawn_blocking(move || bundle_html(&st, &token)).await {
+        Ok(Some((title, body))) => Html(page(&title, &body)).into_response(),
+        Ok(None) => not_found(),
+        Err(_) => internal_error(),
     }
+}
+
+fn bundle_html(st: &Arc<AppState>, token: &str) -> Option<(String, String)> {
+    let meta = store::load_meta(&st.root, token).ok()?;
+    let body = bundle_body(st, &meta);
+    Some((meta.title.clone(), body))
 }
 
 fn not_found() -> Response {
@@ -712,7 +731,16 @@ async fn preview_page(
     State(st): State<Arc<AppState>>,
     APath((token, idx)): APath<(String, usize)>,
 ) -> Response {
-    let meta = match store::load_meta(&st.root, &token) {
+    // 预览要读文件、解 docx、跑 tar，全是同步阻塞活；放到 blocking 线程池里，
+    // 免得一个手机上打开个大文档就把 tokio 的 worker 占死
+    match tokio::task::spawn_blocking(move || preview_body(&st, &token, idx)).await {
+        Ok(res) => res,
+        Err(_) => internal_error(),
+    }
+}
+
+fn preview_body(st: &Arc<AppState>, token: &str, idx: usize) -> Response {
+    let meta = match store::load_meta(&st.root, token) {
         Ok(m) => m,
         Err(_) => return not_found(),
     };
@@ -726,7 +754,7 @@ async fn preview_page(
     let fpath = st
         .root
         .join("bundles")
-        .join(&token)
+        .join(token)
         .join("files")
         .join(&f.stored);
     let head = format!("<p class=eyebrow>{}</p>", esc(&f.name));
@@ -771,14 +799,26 @@ async fn preview_page(
             } else {
                 let media_dir = st.root.join("tmp").join(format!("m-{token}-{idx}"));
                 let media_url = format!("/m/{token}/{idx}");
-                match crate::office::docx_to_html(&fpath, Some((&media_dir, &media_url))) {
-                    Ok(html) => {
-                        format!("{head}<div class=\"md doc\">{}</div>", wrap_tables(&html))
+                // 包里的文件发布后就不变了，所以解析结果可以留着：否则每开一次预览页
+                // 都要把整份 docx 重新解压、重新抽一遍图。缓存的是最终 HTML 片段。
+                let cache = media_dir.join(".rendered.html");
+                if let Ok(cached) = std::fs::read_to_string(&cache) {
+                    cached
+                } else {
+                    match crate::office::docx_to_html(&fpath, Some((&media_dir, &media_url))) {
+                        Ok(html) => {
+                            let inner =
+                                format!("{head}<div class=\"md doc\">{}</div>", wrap_tables(&html));
+                            if std::fs::create_dir_all(&media_dir).is_ok() {
+                                let _ = std::fs::write(&cache, inner.as_bytes());
+                            }
+                            inner
+                        }
+                        Err(e) => format!(
+                            "{head}<p class=muted>这份 Word 文档无法在网页里解析（{}）。请下载原文件，用手机上的 Office 或 WPS 打开。</p>",
+                            esc(&e.to_string())
+                        ),
                     }
-                    Err(e) => format!(
-                        "{head}<p class=muted>这份 Word 文档无法在网页里解析（{}）。请下载原文件，用手机上的 Office 或 WPS 打开。</p>",
-                        esc(&e.to_string())
-                    ),
                 }
             }
         }
@@ -883,6 +923,8 @@ async fn preview_media(
         || name.contains("..")
         // Windows 上 join("C:xxx") 会丢掉前缀、按进程当前目录解析；顺带挡住 NTFS 备用流
         || name.contains(':')
+        // 点开头的文件是内部缓存（如 .rendered.html），不该被当成图片发出去
+        || name.starts_with('.')
     {
         return not_found();
     }
