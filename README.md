@@ -57,7 +57,7 @@ note you type at the bottom of the page lands back in an inbox the agent can rea
 | | |
 | --- | --- |
 | **Publish** | any number of local files as one link (up to 200), plus a whole-bundle zip |
-| **Preview** | Markdown, images, PDF, audio, video, code, diffs, `.docx`, `.xlsx/.xls/.ods`, `.csv/.tsv` as tables, indented `.json`, a file listing for `.zip`/`.tar.gz`, and `.html` reports rendered in a script-free sandbox |
+| **Preview** | Markdown, images, PDF, audio, video, code, diffs, `.docx`, `.xlsx/.xls/.ods`, `.csv/.tsv` as tables, indented `.json`, a file listing for `.zip`/`.tar.gz`, and `.html` reports rendered in a script-free sandbox. Media is served with HTTP `Range`, so video starts without the whole file arriving first and the seek bar works |
 | **Download / forward** | correct UTF-8 filenames; the link works for anyone, no account, no app |
 | **Feedback** | a note box on the page, appended to `data/inbox/feedback.jsonl` |
 | **Expiry** | bundles self-delete (30 days by default, `--days 0` to keep forever) |
@@ -201,9 +201,11 @@ What is by design, what to report privately, and how to harden further:
 * Preview caps are deliberate (512 KB of text, 500 rows × 40 columns per sheet, 200 files per
   bundle, and so on). Past a cap you get a download button and an honest message, not a
   truncated page.
-* No HTTP `Range`, so audio/video must transfer before it plays and large downloads cannot
-  resume. Single-process serving plus a bandwidth-limited free tunnel: fine for documents,
-  painful for a 2 GB video.
+* What a browser can decode is still the browser's decision. `.mp4`/`.mov` recorded as HEVC
+  (the iPhone default) plays on Android Chrome and stalls on Firefox; `.mkv`, `.avi`, `.wmv`
+  and friends are not offered a player at all — the page says so and hands you the download.
+  Single-process serving plus a bandwidth-limited free tunnel: fine for documents, slow for a
+  2 GB video.
 * No HTTPS on the local port — TLS terminates at the tunnel.
 * Free quick tunnels change hostname on every restart, so old links die. Need a stable URL?
   Put the server behind your own domain, a named Cloudflare tunnel or Tailscale and set
@@ -211,7 +213,7 @@ What is by design, what to report privately, and how to harden further:
 * The web UI **and the CLI output** are Chinese; flags, config keys, comments and docs are
   bilingual. A locale layer is a good first contribution — see
   [`CONTRIBUTING.md`](CONTRIBUTING.md).
-* 46 unit tests and CI on three OSes, but no browser automation: what a page looks like on a
+* 53 unit tests and CI on three OSes, but no browser automation: what a page looks like on a
   real phone is still checked by hand, which is why the operations doc carries an acceptance
   checklist.
 

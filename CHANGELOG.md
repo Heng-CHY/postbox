@@ -6,6 +6,38 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- HTTP `Range` on every file route (`/raw/`, `/d/`, `/z/`, `/m/`): `206 Partial Content` with
+  `Content-Range` and a declared `Accept-Ranges: bytes`, `416` with `bytes */<size>` when the
+  requested range starts past the end of the file. This is what makes in-page video work —
+  most `.mp4`/`.mov` files keep their index (`moov`) at the end, so without range requests a
+  browser had to transfer the whole clip before it knew how to decode any of it. Seeking and
+  resumed downloads come with it.
+- More media recognised: `.m4v .3gp .3gpp .mpg .mpeg .m2ts .mts .ogv .vob .rm .rmvb .asf`
+  as video, `.m4a .m4b .aac .opus .oga .amr .aiff .wma .mka` as audio. Several of them were
+  previously `application/octet-stream` and never got a player.
+- A `Content-Type` a player will accept, overriding `mime_guess` where it is wrong for
+  playback (`.m4a` → `audio/mp4` rather than `video/mp4`, `.opus` → `audio/ogg`).
+- The video page states what the phone will actually do with the file: containers no browser
+  decodes (`.mkv`, `.avi`, `.wmv`, `.flv`, transport streams…) get an explanation plus a
+  download button instead of a player that can only go black, and an `.mp4`/`.mov` whose
+  sample entry reads `hvc1`/`hev1` is called out as HEVC — the iPhone default, which Firefox
+  and most desktop browsers cannot decode. The probe reads the first and last 1 MB of the
+  file, so a `moov`-at-end clip is still identified.
+- `playsinline` and `preload="metadata"` on the video element: iOS no longer hijacks a tap
+  into fullscreen, and opening the page costs a few hundred kilobytes instead of the clip.
+
+### Changed
+
+- `.ts` stays TypeScript. MPEG transport streams are matched on `.m2ts`/`.mts`/`.vob`, since
+  a `.ts` source file is the more common thing an agent publishes here.
+- `/m/` (the images pulled out of a `.docx`) now goes through the same sender as the other
+  file routes instead of carrying its own copy.
+- The test suite grows from 46 to 53 tests: range planning, container classification, the
+  media `Content-Type` overrides, and two page-level tests that publish a clip and read back
+  the rendered player.
+
 ## [0.2.0] — 2026-09-30
 
 Found by reading the whole codebase end to end after the preview work landed.

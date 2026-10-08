@@ -42,6 +42,8 @@ Tick these off on a real phone:
 - [ ] `/?key=<access key>` lists every live bundle; wrong or missing key gives the key-entry form, not the list
 - [ ] "Download original" works per file; multi-file bundles produce a zip that actually unzips, with the original non-ASCII filenames intact
 - [ ] Images / PDF / audio / video preview in page; `.md` renders; `.docx` renders with its embedded images; `.xlsx` renders sheet by sheet
+- [ ] Video seeks: `curl -sD - -o /dev/null -H 'Range: bytes=0-1023' http://127.0.0.1:<port>/raw/<token>/<idx>` answers `206` with `content-range: bytes 0-1023/<size>`, and the page's player can be dragged to the middle of a clip without the whole file arriving first
+- [ ] A `.mkv` or `.avi` in the same bundle shows an explanation plus a download button, not a player that can only go black
 - [ ] Wide tables scroll horizontally on a phone instead of collapsing to one character per column
 - [ ] Forwarding the link to someone else works with no account on their side (that is the delivery capability)
 - [ ] After rebooting the machine, the phone receives a "new address" push within ~30 seconds and the new hostname opens; **links minted before the reboot are dead**, by design
@@ -129,8 +131,9 @@ ntfy needs an account. Deleting the directory is the whole uninstall.
 
 ## 7. Known gaps
 
-No HTTP `Range`, so media cannot seek or resume; no HTTPS on the local port (TLS ends at
-the tunnel); no per-bundle password; no access log beyond Cloudflare's; the free tunnel
-has no uptime promise and changes hostname on every restart; the UI and CLI output are
-Chinese-only. Each of these is listed in the README's Limitations section, and each is a
-reasonable thing to send a pull request for.
+No HTTPS on the local port (TLS ends at the tunnel); no per-bundle password; no access log
+beyond Cloudflare's; the free tunnel has no uptime promise and changes hostname on every
+restart; the UI and CLI output are Chinese-only. Codecs the browser itself cannot decode
+(HEVC on Firefox, `.mkv`/`.avi` anywhere) are still a download — the page says so instead of
+showing a black player. Each of the rest is listed in the README's Limitations section, and
+each is a reasonable thing to send a pull request for.

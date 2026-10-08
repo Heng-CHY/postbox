@@ -36,6 +36,11 @@ client  │                              │  ▲             │
 Because of that split, the phone keeps working with your agent client closed, and the
 agent can publish while the tunnel is briefly down (the link updates itself).
 
+File delivery is streaming, and every file route (`/raw/`, `/d/`, `/z/`, `/m/`) honours
+`Range`: a drag on the phone's seek bar becomes a `206` for exactly the bytes asked for, and
+an `.mp4`/`.mov` whose index box sits at the end of the file is read from the tail instead of
+being downloaded whole. Nothing is buffered into memory on the way out.
+
 ## Where the code lives
 
 ```

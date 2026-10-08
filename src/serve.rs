@@ -141,13 +141,45 @@ enum Kind {
     Binary,
 }
 
-fn classify(name: &str) -> Kind {
-    // 没有扩展名时不要把整个文件名当扩展名，否则一个叫 `json` / `csv` / `tar` 的文件会被误派
-    let ext = match name.rsplit_once('.') {
-        Some((_, e)) if !e.is_empty() && !e.contains('/') && !e.contains('\\') => e.to_lowercase(),
+/// 小写扩展名。没有扩展名时给空串 —— 不能把整个文件名当扩展名，否则一个叫
+/// `json` / `csv` / `tar` 的文件会被误派。
+fn ext_of(name: &str) -> String {
+    match name.rsplit_once('.') {
+        Some((_, e)) if !e.is_empty() && !e.contains('/') && !e.contains('\\') => {
+            e.to_ascii_lowercase()
+        }
         _ => String::new(),
-    };
-    match ext.as_str() {
+    }
+}
+
+/// 浏览器自带的解码器覆盖不到这些封装格式（H.265/VC-1/Real/DVD 那一挂）。
+/// 页面里摆一个必然黑屏的播放器不如说清楚：下载下来，用手机上的播放器看。
+fn needs_native_player(ext: &str) -> bool {
+    matches!(
+        ext,
+        "mkv"
+            | "avi"
+            | "wmv"
+            | "asf"
+            | "flv"
+            | "m2ts"
+            | "mts"
+            | "vob"
+            | "mpg"
+            | "mpeg"
+            | "rm"
+            | "rmvb"
+            | "swf"
+            | "wma"
+            | "mka"
+            | "aiff"
+            | "aif"
+            | "amr"
+    )
+}
+
+fn classify(name: &str) -> Kind {
+    match ext_of(name).as_str() {
         "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" | "avif" => Kind::Image,
         "md" | "markdown" => Kind::Markdown,
         "pdf" => Kind::Pdf,
@@ -159,8 +191,12 @@ fn classify(name: &str) -> Kind {
         "zip" | "jar" | "tar" | "gz" | "tgz" | "bz2" | "xz" | "7z" => Kind::Archive,
         "heic" | "heif" => Kind::Heic,
         "diff" | "patch" => Kind::Diff,
-        "mp3" | "wav" | "ogg" | "m4a" | "flac" => Kind::Audio,
-        "mp4" | "webm" | "mov" | "mkv" => Kind::Video,
+        "mp3" | "wav" | "ogg" | "oga" | "m4a" | "m4b" | "flac" | "aac" | "opus" | "amr" | "wma"
+        | "mka" | "aiff" | "aif" => Kind::Audio,
+        // `.ts` 故意不列在这里：它同时是 TypeScript 和 MPEG-TS，而前者在这个工具里常见得多。
+        // 传送流按 `.m2ts` / `.mts` / `.vob` 认。
+        "mp4" | "m4v" | "webm" | "mov" | "mkv" | "avi" | "wmv" | "flv" | "mpg" | "mpeg" | "3gp"
+        | "3gpp" | "m2ts" | "mts" | "ogv" | "vob" | "rm" | "rmvb" | "asf" | "swf" => Kind::Video,
         "rs" | "py" | "js" | "ts" | "jsx" | "tsx" | "c" | "h" | "cpp" | "hpp" | "go" | "java"
         | "rb" | "php" | "sh" | "bat" | "ps1" | "lua" | "toml" | "yaml" | "yml" | "xml" | "sql"
         | "css" | "gradle" | "dart" | "swift" | "kt" | "vue" | "svelte" | "ini" | "cfg" => {
@@ -476,7 +512,11 @@ fn not_found() -> Response {
         .into_response()
 }
 
-async fn bundle_zip(State(st): State<Arc<AppState>>, APath(token): APath<String>) -> Response {
+async fn bundle_zip(
+    State(st): State<Arc<AppState>>,
+    APath(token): APath<String>,
+    headers: HeaderMap,
+) -> Response {
     let meta = match store::load_meta(&st.root, &token) {
         Ok(m) => m,
         Err(_) => return not_found(),
@@ -490,13 +530,57 @@ async fn bundle_zip(State(st): State<Arc<AppState>>, APath(token): APath<String>
         &format!("{}.zip", meta.title),
         true,
         "application/zip",
+        range_of(&headers),
     )
     .await
+}
+
+/// mime_guess 对几个媒体后缀给的类型不适合播放：`.m4a` 会报成 `video/mp4`，
+/// `.opus` 干脆没有登记，而浏览器是严格按 Content-Type 决定要不要交给解码器的。
+/// 这里按后缀覆盖一遍，播放和下载都拿正确的类型。
+fn forced_mime(name: &str) -> Option<&'static str> {
+    let ext = ext_of(name);
+    if ext.is_empty() {
+        return None;
+    }
+    Some(match ext.as_str() {
+        "m4a" | "m4b" => "audio/mp4",
+        "m4v" => "video/mp4",
+        "mp4" => "video/mp4",
+        "mov" => "video/quicktime",
+        "mkv" => "video/x-matroska",
+        "webm" => "video/webm",
+        "weba" => "audio/webm",
+        "opus" | "ogg" | "oga" => "audio/ogg",
+        "ogv" => "video/ogg",
+        "flac" => "audio/flac",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "aac" => "audio/aac",
+        "amr" => "audio/amr",
+        "3gp" | "3gpp" => "video/3gpp",
+        "m2ts" | "mts" => "video/mp2t",
+        "avi" => "video/x-msvideo",
+        "wmv" => "video/x-ms-wmv",
+        "flv" => "video/x-flv",
+        _ => return None,
+    })
+}
+
+fn file_mime(name: &str) -> String {
+    if let Some(m) = forced_mime(name) {
+        return m.to_string();
+    }
+    mime_guess::from_path(name)
+        .first()
+        .map(|m| m.to_string())
+        .unwrap_or_else(|| "application/octet-stream".into())
 }
 
 async fn serve_file(
     State(st): State<Arc<AppState>>,
     APath((token, idx)): APath<(String, usize)>,
+    headers: HeaderMap,
     attachment: bool,
 ) -> Response {
     let meta = match store::load_meta(&st.root, &token) {
@@ -511,15 +595,12 @@ async fn serve_file(
         None => return not_found(),
     };
     let name = meta.files[idx].name.clone();
-    let mime = mime_guess::from_path(&name)
-        .first()
-        .map(|m| m.to_string())
-        .unwrap_or_else(|| "application/octet-stream".into());
-    file_response(&path, &name, attachment, &mime).await
+    let mime = file_mime(&name);
+    file_response(&path, &name, attachment, &mime, range_of(&headers)).await
 }
 
-async fn raw_file(st: State<Arc<AppState>>, p: APath<(String, usize)>) -> Response {
-    serve_file(st, p, false).await
+async fn raw_file(st: State<Arc<AppState>>, p: APath<(String, usize)>, h: HeaderMap) -> Response {
+    serve_file(st, p, h, false).await
 }
 
 /// 上传的 HTML 在这里渲染：CSP 把它关进不透明源，脚本、同源访问、远程子资源全部禁用。
@@ -530,6 +611,7 @@ async fn raw_file(st: State<Arc<AppState>>, p: APath<(String, usize)>) -> Respon
 async fn html_frame(
     State(st): State<Arc<AppState>>,
     APath((token, idx)): APath<(String, usize)>,
+    headers: HeaderMap,
 ) -> Response {
     let meta = match store::load_meta(&st.root, &token) {
         Ok(m) => m,
@@ -544,13 +626,13 @@ async fn html_frame(
     };
     // 太大就不重写了，原样送出：宁可图裂，也别把内存和带宽吃掉
     if f.size > TEXT_PREVIEW_MAX {
-        return serve_file(State(st), APath((token, idx)), false).await;
+        return serve_file(State(st), APath((token, idx)), headers, false).await;
     }
     let Ok(bytes) = std::fs::read(&path) else {
         return not_found();
     };
     let Ok(html) = String::from_utf8(bytes) else {
-        return serve_file(State(st), APath((token, idx)), false).await;
+        return serve_file(State(st), APath((token, idx)), headers, false).await;
     };
     let mut siblings: HashMap<String, std::path::PathBuf> = HashMap::new();
     for (i, file) in meta.files.iter().enumerate() {
@@ -685,16 +767,95 @@ fn data_uri_for(
     Some(format!("data:{mime};base64,{encoded}"))
 }
 
-async fn dl_file(st: State<Arc<AppState>>, p: APath<(String, usize)>) -> Response {
-    serve_file(st, p, true).await
+async fn dl_file(st: State<Arc<AppState>>, p: APath<(String, usize)>, h: HeaderMap) -> Response {
+    serve_file(st, p, h, true).await
 }
 
-/// 流式发送文件：不把整个文件读进内存，几百 MB 的视频也不会把服务打爆
+fn range_of(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| !v.trim().is_empty())
+}
+
+/// 一个 `Range` 头对某个长度的文件该作何处理。
+#[derive(Debug, PartialEq, Eq)]
+enum RangePlan {
+    /// 整个文件（没有 Range，或者单位看不懂 —— RFC 9110 允许忽略不认识的 Range）
+    Full,
+    /// 只发 `start..=end`，两个端点都是闭区间、都已按文件长度收敛
+    Partial { start: u64, end: u64 },
+    /// 起点越界、区间为空或语法不对：回 416，让客户端知道文件长度
+    Unsatisfiable,
+}
+
+/// 只取第一个区间。播放器不会请求多区间，而多区间要回 `multipart/byteranges` 带 boundary，
+/// 为一个用不到的格式引入复杂度不值。数字大得 `u64` 都装不下时按语法错误处理（416），
+/// 真浏览器不会发这种东西。
+fn plan_range(header: Option<&str>, len: u64) -> RangePlan {
+    let Some(raw) = header.map(str::trim) else {
+        return RangePlan::Full;
+    };
+    let Some(spec) = raw.strip_prefix("bytes=") else {
+        return RangePlan::Full;
+    };
+    let spec = spec
+        .split(',')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let Some((s, e)) = spec.split_once('-') else {
+        return RangePlan::Unsatisfiable;
+    };
+    let (s, e) = (s.trim(), e.trim());
+    if s.is_empty() {
+        // `bytes=-500` 是「最后 500 字节」，播放器用它读 moov 在尾部的 mp4
+        let Ok(n) = e.parse::<u64>() else {
+            return RangePlan::Unsatisfiable;
+        };
+        return if n == 0 || len == 0 {
+            RangePlan::Unsatisfiable
+        } else if n >= len {
+            RangePlan::Full
+        } else {
+            RangePlan::Partial {
+                start: len - n,
+                end: len - 1,
+            }
+        };
+    }
+    let Ok(start) = s.parse::<u64>() else {
+        return RangePlan::Unsatisfiable;
+    };
+    let end = if e.is_empty() {
+        len.saturating_sub(1)
+    } else {
+        match e.parse::<u64>() {
+            Ok(v) => v,
+            Err(_) => return RangePlan::Unsatisfiable,
+        }
+    };
+    if len == 0 || start >= len || start > end {
+        return RangePlan::Unsatisfiable;
+    }
+    RangePlan::Partial {
+        start,
+        end: end.min(len - 1),
+    }
+}
+
+/// 流式发送文件，支持 `Range`：不把整个文件读进内存，几百 MB 的视频也不会把服务打爆。
+///
+/// 有了分段请求，手机上的播放器才能拖动进度条；更要紧的是大量 `.mp4`/`.mov` 的 `moov`
+/// box 在文件末尾 —— 只能整段发送时，浏览器必须先下完整个文件才知道怎么解码，
+/// 在隧道上表现就是「点播放没反应」。回 `206` 之后它先取尾部几十 KB 就能开播。
 async fn file_response(
     path: &std::path::Path,
     name: &str,
     attachment: bool,
     mime: &str,
+    range: Option<&str>,
 ) -> Response {
     let Ok(file) = tokio::fs::File::open(path).await else {
         return not_found();
@@ -705,15 +866,41 @@ async fn file_response(
         if attachment { "attachment" } else { "inline" },
         pct_encode(name)
     );
-    let body = axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(file));
-    Response::builder()
-        .status(StatusCode::OK)
+    let base = Response::builder()
         .header(header::CONTENT_TYPE, mime)
-        .header(header::CONTENT_LENGTH, len)
         .header(header::CONTENT_DISPOSITION, disp)
-        .header(header::CACHE_CONTROL, "no-store")
-        .body(body)
-        .unwrap_or_else(|_| internal_error())
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::CACHE_CONTROL, "no-store");
+    match plan_range(range, len) {
+        RangePlan::Full => {
+            let body = axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(file));
+            base.status(StatusCode::OK)
+                .header(header::CONTENT_LENGTH, len)
+                .body(body)
+                .unwrap_or_else(|_| internal_error())
+        }
+        RangePlan::Partial { start, end } => {
+            use tokio::io::{AsyncReadExt, AsyncSeekExt};
+            let mut file = file;
+            if file.seek(std::io::SeekFrom::Start(start)).await.is_err() {
+                return not_found();
+            }
+            let take = end - start + 1;
+            let body =
+                axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(file.take(take)));
+            base.status(StatusCode::PARTIAL_CONTENT)
+                .header(header::CONTENT_LENGTH, take)
+                .header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{len}"))
+                .body(body)
+                .unwrap_or_else(|_| internal_error())
+        }
+        RangePlan::Unsatisfiable => base
+            .status(StatusCode::RANGE_NOT_SATISFIABLE)
+            .header(header::CONTENT_RANGE, format!("bytes */{len}"))
+            .header(header::CONTENT_LENGTH, 0)
+            .body(axum::body::Body::empty())
+            .unwrap_or_else(|_| internal_error()),
+    }
 }
 
 fn internal_error() -> Response {
@@ -725,6 +912,84 @@ fn internal_error() -> Response {
         )),
     )
         .into_response()
+}
+
+/// `.mp4` / `.mov` 的 sample entry fourcc 直接写着这条片子是什么编码。
+/// 只翻文件头和文件尾各 1 MB，命中 `hvc1` / `hev1` 就按 HEVC 处理 —— 这是启发式，
+/// 为此引一个 mp4 解析库不值得；判错的代价是一句提示多余或者缺失。
+fn hevc_in_iso_bmff(path: &std::path::Path) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    const WIN: u64 = 1024 * 1024;
+    let Ok(len) = std::fs::metadata(path).map(|m| m.len()) else {
+        return false;
+    };
+    if len < 16 {
+        return false;
+    }
+    let mut offsets = vec![0u64, len.saturating_sub(WIN)];
+    offsets.dedup();
+    for start in offsets {
+        let Ok(mut f) = std::fs::File::open(path) else {
+            return false;
+        };
+        if f.seek(SeekFrom::Start(start)).is_err() {
+            continue;
+        }
+        let mut buf = Vec::new();
+        if f.take(WIN).read_to_end(&mut buf).is_err() {
+            continue;
+        }
+        if buf.windows(4).any(|w| w == b"hvc1" || w == b"hev1") {
+            return true;
+        }
+        // 头部已经看到 avc1 就是 H.264，不必再翻尾部
+        if start == 0 && buf.windows(4).any(|w| w == b"avc1") {
+            return false;
+        }
+    }
+    false
+}
+
+/// 音视频页内播放。`raw_url` 走的是支持 `Range` 的 `/raw/`，播放器才能拖进度条、
+/// 才能先取文件尾部拿到索引再开播。
+fn media_html(
+    head: &str,
+    tag: &str,
+    raw_url: &str,
+    path: &std::path::Path,
+    name: &str,
+    size: u64,
+) -> String {
+    let ext = ext_of(name);
+    if needs_native_player(&ext) {
+        return format!(
+            "{head}<p><span class=badge>要本机播放器</span></p>\
+<p class=muted><code>.{}</code> 这种封装，浏览器里没有对应的解码器，页面里放不出来。\
+点右上「下载原文件」存到手机，用系统的相册、音乐或视频应用、VLC 都能直接打开；\
+也可以试试下面这个按钮，让系统自己挑一个应用。</p>\
+<p class=muted>这个文件 {}。</p>\
+<p><a class=btn href=\"{raw_url}\" target=_blank rel=\"noopener\">交给系统打开</a></p>",
+            esc(&ext),
+            store::human_size(size),
+        );
+    }
+    let attrs = if tag == "video" {
+        "controls playsinline preload=\"metadata\" style=\"width:100%;max-height:72vh;border-radius:12px;background:#141413\""
+    } else {
+        "controls preload=\"metadata\" style=\"width:100%\""
+    };
+    let player = format!("<{tag} src=\"{raw_url}\" {attrs}></{tag}>");
+    let mut hint = "<p class=muted>拖到新位置会等一下，免费隧道的带宽就这么多。\
+一直转圈的话点右上「下载原文件」，存到手机上看更快。</p>"
+        .to_string();
+    if matches!(ext.as_str(), "mp4" | "m4v" | "mov") && hevc_in_iso_bmff(path) {
+        hint.push_str(
+            "<p class=muted>这条是 HEVC（H.265）编码，iPhone 拍的视频默认就是它。\
+Android 上的 Chrome 和 Edge 一般有硬件解码、能放；Firefox 和多数电脑浏览器没有对应解码器，\
+那边就只能下载后看。</p>",
+        );
+    }
+    format!("{head}{player}{hint}")
 }
 
 async fn preview_page(
@@ -740,13 +1005,20 @@ async fn preview_page(
 }
 
 fn preview_body(st: &Arc<AppState>, token: &str, idx: usize) -> Response {
+    match preview_html(st, token, idx) {
+        Some((title, body)) => Html(page(&title, &body)).into_response(),
+        None => not_found(),
+    }
+}
+
+/// 预览页正文。`None` 表示这一页干脆不渲染（文件不见了 / 包已过期），
+/// 调用方发一个 404 页回去。
+fn preview_html(st: &Arc<AppState>, token: &str, idx: usize) -> Option<(String, String)> {
     let meta = match store::load_meta(&st.root, token) {
         Ok(m) => m,
-        Err(_) => return not_found(),
+        Err(_) => return None,
     };
-    let Some(f) = meta.files.get(idx) else {
-        return not_found();
-    };
+    let f = meta.files.get(idx)?;
     let raw_url = format!("/raw/{token}/{idx}");
     let dl_url = format!("/d/{token}/{idx}");
     let back = format!("<header class=top><a class=back href=\"/b/{}\">← 返回文件列表</a><a class=btn href=\"{}\">下载原文件</a></header>", esc(&meta.token), dl_url);
@@ -764,10 +1036,10 @@ fn preview_body(st: &Arc<AppState>, token: &str, idx: usize) -> Response {
             "{head}<iframe src=\"{raw_url}#toolbar=1\" style=\"width:100%;height:78vh;border:1px solid var(--line);border-radius:12px;background:#fff\"></iframe>
 <p class=muted>看不到内容的话，浏览器可能不支持内嵌 PDF：<a href=\"{raw_url}\" target=_blank rel=\"noopener\">在新窗口打开</a>，或点右上「下载原文件」。</p>"
         ),
-        Kind::Audio => format!("{head}<audio src=\"{raw_url}\" controls style=width:100%></audio>"),
-        Kind::Video => format!(
-            "{head}<video src=\"{raw_url}\" controls style=\"width:100%;border-radius:12px\"></video>"
-        ),
+        Kind::Audio | Kind::Video => {
+            let tag = if kind == Kind::Video { "video" } else { "audio" };
+            media_html(&head, tag, &raw_url, &fpath, &f.name, f.size)
+        }
         Kind::Markdown | Kind::Code | Kind::Text | Kind::Diff => {
             // 先看大小再决定读不读，避免为了判断而把大文件整个吞进内存
             if f.size > TEXT_PREVIEW_MAX {
@@ -777,7 +1049,7 @@ fn preview_body(st: &Arc<AppState>, token: &str, idx: usize) -> Response {
                 )
             } else {
                 let Ok(bytes) = std::fs::read(&fpath) else {
-                    return not_found();
+                    return None;
                 };
                 let text = String::from_utf8_lossy(&bytes);
                 match kind {
@@ -855,7 +1127,7 @@ fn preview_body(st: &Arc<AppState>, token: &str, idx: usize) -> Response {
                 )
             } else {
                 let Ok(bytes) = std::fs::read(&fpath) else {
-                    return not_found();
+                    return None;
                 };
                 let text = String::from_utf8_lossy(&bytes);
                 let delim = if f.name.to_lowercase().ends_with(".tsv") {
@@ -877,7 +1149,7 @@ fn preview_body(st: &Arc<AppState>, token: &str, idx: usize) -> Response {
                 )
             } else {
                 let Ok(bytes) = std::fs::read(&fpath) else {
-                    return not_found();
+                    return None;
                 };
                 let text = String::from_utf8_lossy(&bytes);
                 let (pretty, note) = pretty_json(&text);
@@ -903,7 +1175,7 @@ fn preview_body(st: &Arc<AppState>, token: &str, idx: usize) -> Response {
         esc(&store::fmt_time(meta.created_ms)),
         toast = toast_js()
     );
-    Html(page(&f.name, &body)).into_response()
+    Some((f.name.clone(), body))
 }
 
 /// 表格套上横向滚动容器：窄屏不再把列压到一字宽，超宽时可左右滑
@@ -916,6 +1188,7 @@ fn wrap_tables(html: &str) -> String {
 async fn preview_media(
     State(st): State<Arc<AppState>>,
     APath((token, idx, name)): APath<(String, usize, String)>,
+    headers: HeaderMap,
 ) -> Response {
     if !store::valid_token(&token)
         || name.contains('/')
@@ -936,22 +1209,8 @@ async fn preview_media(
         .join("tmp")
         .join(format!("m-{token}-{idx}"))
         .join(&name);
-    let Ok(file) = tokio::fs::File::open(&path).await else {
-        return not_found();
-    };
-    let len = file.metadata().await.map(|m| m.len()).unwrap_or(0);
-    let mime = mime_guess::from_path(&name)
-        .first_or_octet_stream()
-        .to_string();
-    axum::response::Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, mime)
-        .header(header::CONTENT_LENGTH, len)
-        .header(header::CACHE_CONTROL, "no-store")
-        .body(axum::body::Body::from_stream(
-            tokio_util::io::ReaderStream::new(file),
-        ))
-        .unwrap_or_else(|_| internal_error())
+    let mime = file_mime(&name);
+    file_response(&path, &name, false, &mime, range_of(&headers)).await
 }
 
 /// Markdown 渲染。原始 HTML 一律降级成正文文本，防止别人写的 .md 里夹带脚本
@@ -1423,6 +1682,160 @@ mod tests {
         assert_eq!(classify("x.json"), Kind::Json);
         assert_eq!(classify("photos.HEIC"), Kind::Heic);
         assert_eq!(classify("app.js"), Kind::Code);
+    }
+
+    #[test]
+    fn classify_maps_more_media() {
+        assert_eq!(classify("a.mp4"), Kind::Video);
+        assert_eq!(classify("a.M4V"), Kind::Video);
+        assert_eq!(classify("iPhone视频.mov"), Kind::Video);
+        assert_eq!(classify("a.mkv"), Kind::Video);
+        assert_eq!(classify("a.mpg"), Kind::Video);
+        assert_eq!(classify("a.m2ts"), Kind::Video);
+        // `.ts` 归 TypeScript，不给视频页（见 classify 里的注释）
+        assert_eq!(classify("main.ts"), Kind::Code);
+        assert_eq!(classify("a.m4a"), Kind::Audio);
+        assert_eq!(classify("a.opus"), Kind::Audio);
+        assert_eq!(classify("a.wma"), Kind::Audio);
+    }
+
+    #[test]
+    fn browsers_only_play_some_containers() {
+        // 这些必须走下载，页面里摆个播放器等于骗人
+        for e in ["mkv", "avi", "wmv", "flv", "m2ts", "mpg", "vob", "wma"] {
+            assert!(needs_native_player(e), "{e} should need a native player");
+        }
+        // 这些浏览器自带解码器
+        for e in [
+            "mp4", "m4v", "mov", "webm", "3gp", "mp3", "m4a", "ogg", "opus",
+        ] {
+            assert!(!needs_native_player(e), "{e} should play in page");
+        }
+    }
+
+    #[test]
+    fn media_mime_is_forced_where_mime_guess_is_wrong() {
+        // m4a 会被猜成 video/mp4，浏览器按类型挑解码器， audio 元素就拿不到声音
+        assert_eq!(forced_mime("歌.m4a"), Some("audio/mp4"));
+        assert_eq!(forced_mime("a.mp4"), Some("video/mp4"));
+        assert_eq!(forced_mime("a.opus"), Some("audio/ogg"));
+        assert_eq!(forced_mime("a.mov"), Some("video/quicktime"));
+        // 不认识的后缀交给 mime_guess
+        assert_eq!(forced_mime("a.txt"), None);
+        assert_eq!(forced_mime("noext"), None);
+        assert_eq!(file_mime("a.pdf"), "application/pdf");
+    }
+
+    #[test]
+    fn range_plan_covers_what_players_send() {
+        assert_eq!(plan_range(None, 100), RangePlan::Full);
+        assert_eq!(plan_range(Some(""), 100), RangePlan::Full);
+        assert_eq!(
+            plan_range(Some("bytes=0-"), 100),
+            RangePlan::Partial { start: 0, end: 99 }
+        );
+        assert_eq!(
+            plan_range(Some("bytes=0-49"), 100),
+            RangePlan::Partial { start: 0, end: 49 }
+        );
+        assert_eq!(
+            plan_range(Some("bytes=50-"), 100),
+            RangePlan::Partial { start: 50, end: 99 }
+        );
+        // 尾部区间：moov 在末尾的 mp4 靠这个读到索引
+        assert_eq!(
+            plan_range(Some("bytes=-30"), 100),
+            RangePlan::Partial { start: 70, end: 99 }
+        );
+        // 要的比文件长：收敛到文件末尾，别报 416
+        assert_eq!(
+            plan_range(Some("bytes=0-5000"), 100),
+            RangePlan::Partial { start: 0, end: 99 }
+        );
+        assert_eq!(plan_range(Some("bytes=-5000"), 100), RangePlan::Full);
+        // 多区间只服务第一段
+        assert_eq!(
+            plan_range(Some("bytes=0-9, 20-29"), 100),
+            RangePlan::Partial { start: 0, end: 9 }
+        );
+        // 看不懂的单位等于没有 Range（RFC 9110 允许忽略）
+        assert_eq!(plan_range(Some("items=0-9"), 100), RangePlan::Full);
+    }
+
+    #[test]
+    fn range_plan_rejects_nonsense_with_416() {
+        assert_eq!(
+            plan_range(Some("bytes=100-200"), 100),
+            RangePlan::Unsatisfiable
+        );
+        assert_eq!(
+            plan_range(Some("bytes=60-50"), 100),
+            RangePlan::Unsatisfiable
+        );
+        assert_eq!(plan_range(Some("bytes=-0"), 100), RangePlan::Unsatisfiable);
+        assert_eq!(
+            plan_range(Some("bytes=abc-"), 100),
+            RangePlan::Unsatisfiable
+        );
+        assert_eq!(plan_range(Some("bytes="), 100), RangePlan::Unsatisfiable);
+        // 空文件没有可发的字节
+        assert_eq!(plan_range(Some("bytes=0-"), 0), RangePlan::Unsatisfiable);
+    }
+
+    /// 播放页必须指向 `/raw/`（那条路由带 Range），并且 video 要有 playsinline，
+    /// 否则 iPhone 上的 Safari 会强制全屏。
+    #[test]
+    fn video_preview_renders_a_range_backed_player() {
+        let st = state("video");
+        let dir = std::env::temp_dir().join(format!("postbox-vid-{}", store::now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let clip = dir.join("clip.mp4");
+        std::fs::write(&clip, b"ftypisomavc1\x00paddingpadding").unwrap();
+        let meta =
+            store::publish(&st.root, std::slice::from_ref(&clip), None, "".into(), 1).unwrap();
+
+        let (title, body) = preview_html(&st, &meta.token, 0).unwrap();
+        assert_eq!(title, "clip.mp4");
+        assert!(body.contains("<video"), "{body}");
+        assert!(body.contains("playsinline"));
+        assert!(body.contains("preload=\"metadata\""));
+        assert!(body.contains(&format!("src=\"/raw/{}/0\"", meta.token)));
+        assert!(!body.contains("要本机播放器"), "{body}");
+        // H.264 的片子不该被说成 HEVC
+        assert!(!body.contains("HEVC"), "{body}");
+
+        // mkv 走另一条路：不给播放器，给说明和下载
+        let mkv = dir.join("movie.mkv");
+        std::fs::write(&mkv, [0x1a, 0x45, 0xdf, 0xa3]).unwrap();
+        let m2 = store::publish(&st.root, std::slice::from_ref(&mkv), None, "".into(), 1).unwrap();
+        let (_, body) = preview_html(&st, &m2.token, 0).unwrap();
+        assert!(!body.contains("<video"), "{body}");
+        assert!(body.contains("要本机播放器"), "{body}");
+        assert!(body.contains("下载原文件"), "{body}");
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&st.root).ok();
+    }
+
+    /// iPhone 默认录 HEVC，而手机上的 Firefox 和多数电脑浏览器没有 HEVC 解码器，
+    /// 所以命中 fourcc 时必须把这句话讲出来。
+    #[test]
+    fn hevc_clips_are_called_out() {
+        let st = state("hevc");
+        let dir = std::env::temp_dir().join(format!("postbox-hevc-{}", store::now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let clip = dir.join("IMG_0001.mov");
+        // hvc1 在尾部 1 MB 窗口里（这里直接写在末尾，模拟 moov-at-end）
+        let mut bytes = vec![0u8; 2048];
+        bytes.extend_from_slice(b"moovtrakmdiahdlr hvc1");
+        std::fs::write(&clip, &bytes).unwrap();
+        let meta =
+            store::publish(&st.root, std::slice::from_ref(&clip), None, "".into(), 1).unwrap();
+        let (_, body) = preview_html(&st, &meta.token, 0).unwrap();
+        assert!(body.contains("<video"), "{body}");
+        assert!(body.contains("HEVC"), "{body}");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&st.root).ok();
     }
 
     #[test]
