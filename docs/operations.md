@@ -10,7 +10,7 @@ how to stop and remove it. Installation, config reference and agent setup live i
 
 | Part | Binary | Lifetime | Job |
 | --- | --- | --- | --- |
-| Web server | `postbox up` | long-running (hidden, starts on login once autostart is installed) | stores files, renders phone pages, receives feedback, sweeps expired bundles |
+| Web server | `postbox up` | long-running (hidden, starts on login once autostart is installed) | stores files, renders phone pages, receives feedback, takes uploads into the folders you opened, sweeps expired bundles |
 | Public tunnel | `tools/cloudflared.exe` | child process of the web server, restarted by it with backoff | opens an outward door, hands out an `xxx.trycloudflare.com` hostname |
 | Push | ntfy.sh (a public server, not on your machine) | stateless, called through the system `curl` | buzzes your phone when something new is published |
 | MCP server | `postbox mcp` | spawned by your agent client, dies with it | lets the agent drive the three things above through tool calls |
@@ -46,6 +46,11 @@ Tick these off on a real phone:
 - [ ] A `.mkv` or `.avi` in the same bundle shows an explanation plus a download button, not a player that can only go black
 - [ ] Wide tables scroll horizontally on a phone instead of collapsing to one character per column
 - [ ] Forwarding the link to someone else works with no account on their side (that is the delivery capability)
+- [ ] `postbox upload add D:\somewhere` then the phone page `/upload`: one small file lands in that folder (or in the subfolder you typed), and `postbox uploads` lists it
+- [ ] Uploading the same name twice produces `名字 (1).ext` — nothing on the PC gets overwritten
+- [ ] `postbox upload add C:\anything` is refused with a sentence that says why; so is a folder that does not exist yet
+- [ ] Without the access key the upload page answers 401 and `POST /api/upload` answers 401
+- [ ] Submitting feedback from the phone page works (it needs `connect-src 'self'` in the CSP; without it the button silently does nothing)
 - [ ] After rebooting the machine, the phone receives a "new address" push within ~30 seconds and the new hostname opens; **links minted before the reboot are dead**, by design
 - [ ] Expired bundles (30 days by default) disappear on their own — their page turns into "链接不存在或已过期"
 - [ ] `curl -sD - -o /dev/null https://<host>/b/<token>` shows `content-security-policy`, `x-content-type-options: nosniff` and `referrer-policy`
@@ -62,6 +67,7 @@ Tick these off on a real phone:
 | `up` dies | pages unreachable; MCP keeps publishing into `data/` happily | run `postbox up` again, or wait for the login item |
 | You edit `port` / `bind` / `tunnel` | the running server keeps the old values | restart `postbox up` |
 | You edit `access_key` / `ntfy_topic` | picked up without a restart | resubscribe the phone if the topic changed |
+| You `upload add` / `upload rm` a folder | picked up without a restart; an empty list removes the entry from the home page entirely | nothing |
 | `data/config.json` lost | access key and topic are regenerated on next use | resubscribe the phone to the new topic; old bundle links still work (tokens live in `bundles/`) |
 
 ## 4. Stop and uninstall
@@ -111,6 +117,10 @@ ntfy needs an account. Deleting the directory is the whole uninstall.
 | Published, but the link points at `127.0.0.1` | `postbox config base_url get` returns `(none)` → the tunnel never reported a hostname | Check `cloudflared` path/network; `up` prints 隧道就绪 when it works |
 | Two clients, only one reachable from the phone | They have different `--root`, i.e. two independent instances with two keys and two topics | Point every client's MCP entry at the same `data/` directory |
 | Word preview shows an empty box | legacy `.doc` is not supported; documents over 20 MB are not previewed | download and open in Office/WPS |
+| The phone's 提交反馈 button does nothing | the page's CSP needs `connect-src 'self'`; check the header with `curl -sD -` | rebuild from current `master` — 0.2.0 shipped without it |
+| Upload page lists no folders | `upload_dirs` is empty | `postbox upload add D:\某个目录` |
+| Upload fails at exactly 100 MB | Cloudflare's free-plan request-body cap, hit by the tunnel before the app | publish the file from the PC instead, or move to a named tunnel / LAN where you set the cap |
+| Upload says the folder does not exist | someone renamed or deleted it on the PC | `postbox upload list` flags it; re-add or remove the entry |
 | Word text renders but images are missing | images live in `data/tmp/m-<token>-<idx>/`, deleted when the bundle expires | re-publish the document |
 | `cargo build` fails with "access denied" (os error 5) | the exe is locked by the running service or an MCP process | kill it first, or build with `--target-dir` |
 | Forgot the home page URL or key | `postbox token` | prints `<base_url>/?key=<access_key>` |
@@ -131,8 +141,9 @@ ntfy needs an account. Deleting the directory is the whole uninstall.
 
 ## 7. Known gaps
 
-No HTTPS on the local port (TLS ends at the tunnel); no per-bundle password; no access log
-beyond Cloudflare's; the free tunnel has no uptime promise and changes hostname on every
+No HTTPS on the local port (TLS ends at the tunnel); no per-bundle password; uploads are
+capped at 100 MB per file because that is Cloudflare's free-plan request-body limit; no access
+log beyond Cloudflare's; the free tunnel has no uptime promise and changes hostname on every
 restart; the UI and CLI output are Chinese-only. Codecs the browser itself cannot decode
 (HEVC on Firefox, `.mkv`/`.avi` anywhere) are still a download — the page says so instead of
 showing a black player. Each of the rest is listed in the README's Limitations section, and

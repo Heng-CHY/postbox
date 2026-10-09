@@ -14,6 +14,10 @@ const FEEDBACK_KEEP_BYTES: u64 = 2 * 1024 * 1024;
 pub const MAX_FILES_PER_BUNDLE: usize = 200;
 /// data/tmp 下的临时文件保留时长（Word 预览解出的图片、publish_text 落盘）
 pub const TMP_MAX_AGE_MS: i64 = 24 * 3600 * 1000;
+/// 白名单里最多开几个上传目录：再多手机页面上也选不过来了
+pub const MAX_UPLOAD_DIRS: usize = 20;
+/// 一条上传记录超过这个大小就裁掉最旧的（元数据很小，纯粹防它无限长）
+const UPLOAD_KEEP_BYTES: u64 = 512 * 1024;
 
 fn default_bind() -> String {
     "0.0.0.0".into()
@@ -38,6 +42,10 @@ pub struct Config {
     /// 监听地址。公网隧道场景保持 0.0.0.0 即可；只想局域网用可改成 127.0.0.1
     #[serde(default = "default_bind")]
     pub bind: String,
+    /// 手机 → 电脑 上传允许落盘的目录（绝对路径，且不在系统盘）。
+    /// 空列表等于这个功能没开：首页不显示入口，接口也没有可选目标。
+    #[serde(default)]
+    pub upload_dirs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,6 +149,139 @@ pub fn valid_token(token: &str) -> bool {
     !token.is_empty() && token.len() <= 64 && token.chars().all(|c| c.is_ascii_hexdigit())
 }
 
+/// 去掉 Windows `canonicalize()` 加上的 `\\?\` 前缀：这个写法要给程序看，
+/// 直接印到手机上没人读得懂，而且它会改变路径比较的结果。
+fn strip_verbatim(p: &Path) -> PathBuf {
+    let s = p.to_string_lossy().to_string();
+    #[cfg(windows)]
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        return PathBuf::from(rest);
+    }
+    PathBuf::from(s)
+}
+
+/// 是否落在系统盘上。用户的要求是「除 C 盘外」：Windows 按 `%SystemDrive%` 判
+/// （绝大多数机器就是 `C:`，但装到别处的也不能漏），其他系统按根目录判。
+pub fn is_system_volume(p: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        let drive = std::env::var("SystemDrive")
+            .unwrap_or_else(|_| "C:".into())
+            .to_ascii_uppercase();
+        match p.components().next() {
+            Some(std::path::Component::Prefix(pf)) => pf
+                .as_os_str()
+                .to_string_lossy()
+                .to_ascii_uppercase()
+                .starts_with(&drive),
+            _ => false,
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        p == Path::new("/")
+    }
+}
+
+/// 校验并规范化一个上传目录：必须已经存在、必须是绝对路径、不能是系统盘。
+/// 返回规范化之后的路径字符串，配置里存的就是它。
+///
+/// 要求「已存在」是故意的：打错一个字母就登记进来，手机页面上会一直显示一个
+/// 传进去就报错的目录，远不如现在就说清楚。
+pub fn validate_upload_dir(raw: &Path) -> Result<String> {
+    if !raw.exists() {
+        bail!("目录不存在: {}（先建好再加，或者检查拼写）", raw.display());
+    }
+    if !raw.is_dir() {
+        bail!("那是一个文件，不是目录: {}", raw.display());
+    }
+    let abs = strip_verbatim(&raw.canonicalize().unwrap_or_else(|_| {
+        if raw.is_absolute() {
+            raw.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(raw)
+        }
+    }));
+    if is_system_volume(&abs) {
+        bail!(
+            "{} 在系统盘上，不开放上传。手机往系统盘里写东西出事就没法收拾，\
+             换一个盘（比如 D:\\ 下的目录）。",
+            abs.display()
+        );
+    }
+    Ok(abs.display().to_string())
+}
+
+/// 一次手机上传的流水。只记元数据，文件本身只落在选定的目录里，
+/// 不在 `data/` 下留副本 —— 留一份等于占两倍空间，还没有意义。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UploadRecord {
+    pub ms: i64,
+    /// 落在哪个白名单目录下（绝对路径）
+    pub dir: String,
+    /// 目录里的那一层子目录名
+    pub sub: String,
+    pub name: String,
+    pub size: u64,
+    /// 真实来源 IP（隧道场景读 CF-Connecting-IP）
+    #[serde(default)]
+    pub ip: String,
+}
+
+pub fn uploads_file(root: &Path) -> PathBuf {
+    root.join("inbox").join("uploads.jsonl")
+}
+
+pub fn append_upload(root: &Path, rec: &UploadRecord) -> Result<()> {
+    std::fs::create_dir_all(root.join("inbox"))?;
+    let path = uploads_file(root);
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)?;
+    writeln!(f, "{}", serde_json::to_string(rec)?)?;
+    drop(f);
+    rotate_jsonl(&path, UPLOAD_KEEP_BYTES);
+    Ok(())
+}
+
+pub fn list_uploads(root: &Path, limit: usize) -> Vec<UploadRecord> {
+    let mut all = Vec::new();
+    if let Ok(text) = std::fs::read_to_string(uploads_file(root)) {
+        for line in text.lines() {
+            if let Ok(u) = serde_json::from_str::<UploadRecord>(line) {
+                all.push(u);
+            }
+        }
+    }
+    all.sort_by_key(|u| std::cmp::Reverse(u.ms));
+    all.truncate(limit);
+    all
+}
+
+/// 目录里不能重名覆盖：`报告.pdf` 已存在就存成 `报告 (1).pdf`，
+/// 手机传上来的东西把电脑上的原件顶掉是不可逆的。
+pub fn unique_name(dir: &Path, name: &str) -> String {
+    if !dir.join(name).exists() {
+        return name.to_string();
+    }
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, e)) if !s.is_empty() && !e.contains('/') && !e.contains('\\') => {
+            (s.to_string(), format!(".{e}"))
+        }
+        _ => (name.to_string(), String::new()),
+    };
+    for i in 1..=999 {
+        let candidate = format!("{stem} ({i}){ext}");
+        if !dir.join(&candidate).exists() {
+            return candidate;
+        }
+    }
+    format!("{stem} -{}{ext}", now_ms())
+}
+
 fn bundles_dir(root: &Path) -> PathBuf {
     root.join("bundles")
 }
@@ -187,6 +328,7 @@ pub fn init_root(root: &Path) -> Result<Config> {
         ntfy_topic: Uuid::new_v4().simple().to_string(),
         cloudflared: "tools/cloudflared.exe".into(),
         bind: default_bind(),
+        upload_dirs: Vec::new(),
     };
     write_atomic(&cfg_path, serde_json::to_string_pretty(&cfg)?.as_bytes())?;
     Ok(cfg)
@@ -458,6 +600,12 @@ pub fn append_feedback(root: &Path, fb: &Feedback) -> Result<()> {
 
 /// 收件箱文件只保留较新的部分，避免单请求全量读盘越来越慢
 fn rotate_feedback(path: &Path) {
+    rotate_jsonl(path, FEEDBACK_KEEP_BYTES);
+}
+
+/// 按字节从最新往回裁。原先按「行数的一半但不低于 1000 行」，
+/// 对「行数少但每行很大」的收件箱永远裁不到上限，还会每次全量重写。
+fn rotate_jsonl(path: &Path, keep_bytes: u64) {
     let Ok(len) = path.metadata().map(|m| m.len()) else {
         return;
     };
@@ -467,13 +615,11 @@ fn rotate_feedback(path: &Path) {
     let Ok(text) = std::fs::read_to_string(path) else {
         return;
     };
-    // 按字节从最新往回裁。原先按「行数的一半但不低于 1000 行」，
-    // 对「行数少但每行很大」的收件箱永远裁不到上限，还会每次全量重写。
     let mut kept: Vec<&str> = Vec::new();
     let mut total = 0u64;
     for line in text.lines().rev() {
         total += line.len() as u64 + 1;
-        if total > FEEDBACK_KEEP_BYTES {
+        if total > keep_bytes {
             break;
         }
         kept.push(line);
@@ -535,6 +681,86 @@ mod tests {
         assert!(!valid_token("../../x"));
         assert!(!valid_token("deadbeef%2F"));
         assert!(!valid_token("x".repeat(100).as_str()));
+    }
+
+    #[test]
+    fn upload_dir_must_exist_and_be_a_directory() {
+        let dir = std::env::temp_dir().join(format!("postbox-updir-{}", now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.txt");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(validate_upload_dir(&file).is_err(), "文件不能当上传目录");
+        assert!(
+            validate_upload_dir(&dir.join("nope")).is_err(),
+            "不存在就直说"
+        );
+        // 系统盘那条规则按平台分开测（下面两个）
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 「除 C 盘外」这条要求要在加目录时就拦住，而不是等手机传了一半才失败。
+    #[cfg(windows)]
+    #[test]
+    fn upload_dir_rejects_the_system_drive() {
+        assert!(is_system_volume(std::path::Path::new(r"C:\Windows\Temp")));
+        assert!(!is_system_volume(std::path::Path::new(r"D:\somewhere")));
+        let err = validate_upload_dir(std::path::Path::new(r"C:\Windows\Temp")).unwrap_err();
+        assert!(
+            err.to_string().contains("系统盘"),
+            "报错要讲清楚为什么不行: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn upload_dir_rejects_the_root_filesystem() {
+        assert!(is_system_volume(Path::new("/")));
+        assert!(!is_system_volume(Path::new("/tmp")));
+        assert!(validate_upload_dir(Path::new("/")).is_err());
+    }
+
+    #[test]
+    fn uploads_are_recorded_without_keeping_a_copy() {
+        let root = tmp_root("uploads");
+        init_root(&root).unwrap();
+        for i in 0..3 {
+            append_upload(
+                &root,
+                &UploadRecord {
+                    ms: now_ms() + i,
+                    dir: "D:\\手机传上来".into(),
+                    sub: "2026-10-09".into(),
+                    name: format!("IMG_{i}.jpg"),
+                    size: 1024 * (i as u64 + 1),
+                    ip: "203.0.113.9".into(),
+                },
+            )
+            .unwrap();
+        }
+        let list = list_uploads(&root, 10);
+        assert_eq!(list.len(), 3);
+        // 最新的一条在前
+        assert_eq!(list[0].name, "IMG_2.jpg");
+        assert_eq!(list[0].dir, "D:\\手机传上来");
+        // 只记元数据：data/ 下面不该多出文件副本
+        assert!(!root.join("inbox").join("uploads").exists());
+        assert!(uploads_file(&root).is_file());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn unique_name_never_overwrites() {
+        let dir = std::env::temp_dir().join(format!("postbox-uniq-{}", now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("报告.pdf"), b"old").unwrap();
+        assert_eq!(unique_name(&dir, "别的.txt"), "别的.txt");
+        assert_eq!(unique_name(&dir, "报告.pdf"), "报告 (1).pdf");
+        std::fs::write(dir.join("报告 (1).pdf"), b"x").unwrap();
+        assert_eq!(unique_name(&dir, "报告.pdf"), "报告 (2).pdf");
+        // 没有扩展名的、多个点的、隐藏文件样式都别炸
+        assert_eq!(unique_name(&dir, "README"), "README");
+        assert_eq!(unique_name(&dir, "a.tar.gz"), "a.tar.gz");
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

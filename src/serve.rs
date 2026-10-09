@@ -24,6 +24,10 @@ const FB_PER_MIN: u32 = 6;
 const TEXT_PREVIEW_MAX: u64 = 512 * 1024;
 /// Word / 表格页内解析上限
 const OFFICE_PREVIEW_MAX: u64 = 20 * 1024 * 1024;
+/// 手机上传的单文件上限。这个数字不是保守，是天花板：Cloudflare 免费计划的
+/// 请求体上限就是 100 MB，超了它在隧道那一层直接回 413，根本到不了这里。
+/// 页面提前拦住，是为了让人看到一句人话而不是「传到 90% 断了」。
+const UPLOAD_MAX: u64 = 100 * 1024 * 1024;
 
 pub struct AppState {
     pub root: PathBuf,
@@ -84,7 +88,10 @@ fn csp_for(path: &str) -> &'static str {
     } else if path.starts_with("/raw/") || path.starts_with("/m/") {
         "sandbox; default-src 'none'"
     } else {
-        "default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; frame-src 'self'; base-uri 'none'; form-action 'self'"
+        // connect-src 'self' 是给页内那两个 JS 用的：提交反馈和手机上传都要往
+        // 同源发请求。少了这一行它会回落到 default-src 'none'，按钮点了没反应
+        // ——0.2.0 加严格 CSP 时就这么把反馈提交弄坏过一次。
+        "default-src 'none'; connect-src 'self'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; frame-src 'self'; base-uri 'none'; form-action 'self'"
     }
 }
 
@@ -292,6 +299,18 @@ h3.sub{font-size:14.5px;margin:20px 0 2px;color:var(--head)}
 header.top{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:2px 0}
 .back{color:var(--muted) !important;font-size:14px;white-space:nowrap}
 .doc{overflow-wrap:anywhere}
+.updir{display:flex;gap:10px;align-items:flex-start;padding:11px 0;border-top:1px solid var(--line);cursor:pointer}
+.updir:first-of-type{border-top:none}
+.updir input{margin-top:5px;accent-color:var(--acc);flex:none}
+.updir span{min-width:0}
+.updir b{font-weight:600;word-break:break-all}
+.updir small{display:block;color:var(--muted);font-size:12.5px;margin-top:1px}
+.bar{height:4px;background:var(--soft);border-radius:3px;overflow:hidden;margin:7px 0 3px}
+.bar>i{display:block;height:100%;width:0;background:var(--acc);transition:width .2s}
+ul.upl{list-style:none;margin:12px 0 0;padding:0}
+ul.upl li{padding:9px 0;border-top:1px solid var(--line);font-size:13.5px;word-break:break-all}
+.upl .ok{color:#3f7d4e}
+.upl .bad{color:var(--acc-d)}
 "#;
 
 fn page(title: &str, body: &str) -> String {
@@ -335,13 +354,8 @@ fn home_body(
     headers: HeaderMap,
     q: std::collections::HashMap<String, String>,
 ) -> Response {
-    let key = q
-        .get("key")
-        .cloned()
-        .filter(|k| !k.is_empty())
-        .unwrap_or_else(|| cookie_key(&headers));
     let cfg = st.current_cfg();
-    if cfg.access_key.is_empty() || key != cfg.access_key {
+    if !key_matches(&cfg, &headers, &q) {
         let body = r#"<h1>访问验证</h1><div class=card><form onsubmit="location='/?key='+encodeURIComponent(document.getElementById('k').value);return false"><input id=k type=password placeholder="访问密钥" style="width:100%;padding:10px;border:1px solid var(--line);border-radius:8px;font:inherit"><button class=btn style="margin-top:10px">进入</button></form><p class=muted>密钥在电脑上运行 <code>postbox token</code> 可以看到。</p></div>"#;
         return (StatusCode::OK, Html(page("访问验证", body))).into_response();
     }
@@ -380,21 +394,22 @@ fn home_body(
         fb_html =
             "<p class=muted>还没有反馈。你在文件包页面底部写的意见都会汇总到这里。</p>".into();
     }
+    let upload = if cfg.upload_dirs.is_empty() {
+        String::new()
+    } else {
+        "<div class=card><h2>传到电脑上</h2><p class=hint>方向是 手机 → 电脑：选一个电脑上开好的目录，把手机里的照片、录音、文档推上去。单个文件 100 MB 以内。</p><a class=btn href=\"/upload\">打开上传页</a></div>".to_string()
+    };
     let body = format!(
         "<header class=top><h1>文件寄递台</h1><span class=badge>共 {} 项</span></header>\
 <div class=card><h2>已发布</h2><p class=hint>方向是 电脑 → 手机：这些是推送到你手机上的文件包。</p><ul class=files>{rows}</ul></div>\
+{upload}\
 <div class=card><h2>手机回传的意见</h2><p class=hint>方向是 手机 → 电脑：你在文件包页面底部写的字会存回电脑的收件箱，只有我这边的 agent 读得到。</p>{fb_html}</div>",
         bundles.len()
     );
     let mut res = Html(page("文件寄递台", &body)).into_response();
     // 通过 ?key= 进来时把密钥记到 Cookie，这样文件页的返回按钮不必再带上明文密钥
     if q.contains_key("key") {
-        if let Ok(v) = HeaderValue::from_str(&format!(
-            "pb_key={}; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax",
-            cfg.access_key
-        )) {
-            res.headers_mut().append(header::SET_COOKIE, v);
-        }
+        set_key_cookie(&mut res, &cfg);
     }
     res
 }
@@ -1489,6 +1504,360 @@ fn render_diff(text: &str) -> String {
     out
 }
 
+/// cloudflared 是本地反代，对端永远是 127.0.0.1：只看 addr 的话「每 IP 6 条/分钟」
+/// 会变成全站共享 6 条，谁都能把别人的配额刷光。真实来源在 `CF-Connecting-IP` 里，
+/// 但只有对端确实是回环时才可信 —— 直接暴露到局域网时这个头能被伪造。
+fn client_ip(addr: &SocketAddr, headers: &HeaderMap) -> String {
+    let peer = addr.ip();
+    if !peer.is_loopback() {
+        return peer.to_string();
+    }
+    headers
+        .get("cf-connecting-ip")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            headers
+                .get("x-forwarded-for")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.split(',').next().map(|x| x.trim().to_string()))
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| peer.to_string())
+}
+
+/// 首页密钥对得上吗：`?key=` 优先，其次 `pb_key` Cookie。
+fn key_matches(cfg: &Config, headers: &HeaderMap, q: &HashMap<String, String>) -> bool {
+    let key = q
+        .get("key")
+        .cloned()
+        .filter(|k| !k.is_empty())
+        .unwrap_or_else(|| cookie_key(headers));
+    !cfg.access_key.is_empty() && key == cfg.access_key
+}
+
+fn json_err(code: StatusCode, msg: &str) -> Response {
+    (code, Json(json!({"ok": false, "error": msg}))).into_response()
+}
+
+/// 一次上传的落点。单独拎出来做纯函数，是因为路径拼接的坑不该等真上传时才发现。
+///
+/// 目录只能按白名单序号选；子目录名和文件名都过 `sanitize_name`（分隔符、`..`、`:`
+/// 一律换成 `_`），拼完再确认一次结果仍在白名单目录下。
+#[derive(Debug, PartialEq, Eq)]
+struct UploadDest {
+    /// 白名单里那条路径，原样（记流水用）
+    dir: String,
+    /// 白名单下面的那层子目录，可能为空
+    sub: String,
+    /// 实际要写的目录 = dir + sub
+    target: std::path::PathBuf,
+    ///  sanitize 之后的文件名
+    name: String,
+}
+
+fn upload_target(
+    cfg: &Config,
+    q: &HashMap<String, String>,
+) -> Result<UploadDest, (StatusCode, String)> {
+    let bad = |m: &str| Err((StatusCode::BAD_REQUEST, m.to_string()));
+    let Some(idx) = q.get("d").and_then(|s| s.trim().parse::<usize>().ok()) else {
+        return bad("没说要传到哪个目录");
+    };
+    let Some(dir) = cfg.upload_dirs.get(idx) else {
+        return bad("那个目录已经不在白名单里了，刷新页面重选一个");
+    };
+    let base = std::path::PathBuf::from(dir);
+    if !base.is_dir() {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "电脑上那个目录现在不存在了，让电脑端 postbox upload list 看一眼".to_string(),
+        ));
+    }
+    let raw_sub = q.get("sub").map(|s| s.trim()).unwrap_or("");
+    let sub = if raw_sub.is_empty() {
+        String::new()
+    } else {
+        store::sanitize_name(raw_sub)
+    };
+    let raw_name = q.get("n").map(|s| s.trim()).unwrap_or("");
+    if raw_name.is_empty() {
+        return bad("文件名是空的");
+    }
+    let name = store::sanitize_name(raw_name);
+    let target = if sub.is_empty() {
+        base.clone()
+    } else {
+        base.join(&sub)
+    };
+    if !target.starts_with(&base) {
+        return bad("目录名不合法");
+    }
+    Ok(UploadDest {
+        dir: dir.clone(),
+        sub,
+        target,
+        name,
+    })
+}
+
+async fn upload_page(
+    State(st): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let cfg = st.current_cfg();
+    if !key_matches(&cfg, &headers, &q) {
+        return need_key();
+    }
+    if cfg.upload_dirs.is_empty() {
+        let body = "<h1>还没开放上传</h1><p class=muted>电脑上运行 <code>postbox upload add D:\\某个目录</code> 开一个目录，手机这边就有线了。</p>";
+        return (StatusCode::OK, Html(page("上传", body))).into_response();
+    }
+    let mut res = Html(page("传到电脑上", &upload_form_html(&cfg))).into_response();
+    // 用 ?key= 进来的话顺手把密钥记成 Cookie，往后同源请求不必再带明文
+    if q.contains_key("key") {
+        set_key_cookie(&mut res, &cfg);
+    }
+    res
+}
+
+/// 密钥写进 Cookie 的那段逻辑，首页和上传页共用。
+fn set_key_cookie(res: &mut Response, cfg: &Config) {
+    if let Ok(v) = HeaderValue::from_str(&format!(
+        "pb_key={}; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax",
+        cfg.access_key
+    )) {
+        res.headers_mut().append(header::SET_COOKIE, v);
+    }
+}
+
+fn need_key() -> Response {
+    let body = r#"<h1>访问验证</h1><div class=card><form onsubmit="location='/upload?key='+encodeURIComponent(document.getElementById('k').value);return false"><input id=k type=password placeholder="访问密钥" style="width:100%;padding:10px;border:1px solid var(--line);border-radius:8px;font:inherit"><button class=btn style="margin-top:10px">进入</button></form><p class=muted>密钥在电脑上运行 <code>postbox token</code> 可以看到。</p></div>"#;
+    (StatusCode::UNAUTHORIZED, Html(page("访问验证", body))).into_response()
+}
+
+fn upload_form_html(cfg: &Config) -> String {
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let mut dirs = String::new();
+    for (i, d) in cfg.upload_dirs.iter().enumerate() {
+        let gone = !std::path::Path::new(d).is_dir();
+        dirs.push_str(&format!(
+            "<label class=updir><input type=radio name=dir value=\"{i}\"{}><span><b>{}</b><small>{}</small></span></label>",
+            if i == 0 { " checked" } else { "" },
+            esc(d),
+            if gone {
+                "这个目录现在不存在，选了会报错"
+            } else {
+                "手机上的文件会直接落到这里"
+            }
+        ));
+    }
+    format!(
+        r#"<header class=top><a class=back href="/">← 全部文件</a><span class=badge>手机 → 电脑</span></header>
+<div class=card><h1>传到电脑上</h1>
+<p class=hint>选目录、选文件，然后点上传。单个文件 100 MB 以内 —— 公网隧道那一层的上限就是这个数，超了它自己也拒收。</p>
+<h3 class=sub>存到哪个目录</h3>{dirs}
+<h3 class=sub>再放进哪个小文件夹（可选）</h3>
+<input id=sub value="{today}" style="width:100%;padding:10px;border:1px solid var(--line);border-radius:8px;font:inherit">
+<p class=muted>默认按今天的日期建一层，方便归档；不想分层就把它清空。</p>
+<h3 class=sub>选文件</h3>
+<p><label class=btn>选文件<input id=f type=file multiple hidden></label>
+<label class=btn>拍照 / 录像<input id=c type=file accept="image/*,video/*" hidden></label></p>
+<p id=names class=muted>还没选。</p>
+<ul class=upl id=ul></ul>
+<button class=btn id=go onclick=go() style="width:100%">上传</button>
+</div>{toast}<script>{JS}</script>"#,
+        toast = toast_js(),
+        JS = UPLOAD_JS
+    )
+}
+
+const UPLOAD_JS: &str = r#"
+const MAXB=104857600;
+function fmt(n){if(n<1024)return n+' B';if(n<1048576)return (n/1024).toFixed(1)+' KB';return (n/1048576).toFixed(1)+' MB'}
+function esc(s){return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
+function picked(){return [...document.getElementById('f').files,...document.getElementById('c').files]}
+function names(){const p=picked();document.getElementById('names').textContent=p.length?('已选 '+p.length+' 个：'+p.map(f=>f.name+' ('+fmt(f.size)+')').join('、')):'还没选。'}
+async function go(){
+  const files=picked();
+  if(!files.length){toast('先选文件');return}
+  const dir=document.querySelector('input[name=dir]:checked');
+  if(!dir){toast('先选一个目录');return}
+  const sub=document.getElementById('sub').value.trim();
+  const list=document.getElementById('ul');list.innerHTML='';
+  let ok=0,bad=0;
+  for(const fl of files){
+    const li=document.createElement('li');
+    const t=document.createElement('div');t.textContent=fl.name+' · '+fmt(fl.size);
+    const bar=document.createElement('i');const bw=document.createElement('div');bw.className='bar';bw.append(bar);
+    const st=document.createElement('div');
+    li.append(t,bw,st);list.append(li);
+    if(fl.size>MAXB){st.innerHTML='<span class=bad>超过 100 MB，跳过。这种还是先用电脑往手机发，或者换 Tailscale。</span>';bad++;continue}
+    bar.style.width='2%';
+    const r=await one(fl,dir.value,sub,bar);
+    if(r.ok){ok++;bar.style.width='100%';st.innerHTML='<span class=ok>已存到 '+esc(r.where)+'</span>'}
+    else{bad++;st.innerHTML='<span class=bad>'+esc(r.error||('失败 '+(r.status||'')))+'</span>'}
+  }
+  toast('完成：成功 '+ok+' 个'+(bad?('，失败 '+bad+' 个'):''));
+}
+function one(fl,dir,sub,bar){return new Promise(res=>{
+  const q=new URLSearchParams(location.search);
+  let u='/api/upload?d='+encodeURIComponent(dir)+'&sub='+encodeURIComponent(sub)+'&n='+encodeURIComponent(fl.name);
+  if(q.get('key'))u+='&key='+encodeURIComponent(q.get('key'));
+  const x=new XMLHttpRequest();
+  x.open('POST',u,true);
+  x.upload.onprogress=e=>{if(e.lengthComputable)bar.style.width=Math.max(2,e.loaded/e.total*100).toFixed(1)+'%'};
+  x.onload=()=>{try{res(JSON.parse(x.responseText))}catch(_){res({ok:false,error:'服务端回了看不懂的内容（'+x.status+'）'})}};
+  x.onerror=()=>res({ok:false,error:'传输断了：可能是隧道掉线，或者文件太大被上游拒收'});
+  x.ontimeout=()=>res({ok:false,error:'超时了'});
+  x.timeout=600000;
+  x.send(fl);
+})}
+"#;
+
+async fn api_upload(
+    State(st): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+    req: axum::extract::Request,
+) -> Response {
+    use tokio::io::AsyncReadExt;
+    let body = req.into_body().into_data_stream();
+    let cfg = st.current_cfg();
+    if !key_matches(&cfg, &headers, &q) {
+        return json_err(
+            StatusCode::UNAUTHORIZED,
+            "没有访问密钥，传不了。先在电脑上打开首页输一次密钥。",
+        );
+    }
+    let dest = match upload_target(&cfg, &q) {
+        Ok(v) => v,
+        Err((code, msg)) => return json_err(code, &msg),
+    };
+    let declared = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<u64>().ok());
+    let Some(len) = declared else {
+        return json_err(
+            StatusCode::LENGTH_REQUIRED,
+            "浏览器没报文件大小，这边不敢收。",
+        );
+    };
+    if len == 0 {
+        return json_err(StatusCode::BAD_REQUEST, "这个文件是空的。");
+    }
+    if len > UPLOAD_MAX {
+        return json_err(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            &format!(
+                "单个文件上限 100 MB（Cloudflare 免费隧道那一层就卡这个数），这个 {}。",
+                store::human_size(len)
+            ),
+        );
+    }
+    let dir = dest.target.clone();
+    let name = dest.name.clone();
+    if let Err(e) = tokio::fs::create_dir_all(&dir).await {
+        return json_err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("电脑上建不了那个子目录：{e}"),
+        );
+    }
+    // 先落到 .part，收完再改名：中途断线不会在目录里留下半截文件
+    let part = dir.join(format!(".{}.{}.part", name, uuid::Uuid::new_v4().simple()));
+    let mut file = match tokio::fs::File::create(&part).await {
+        Ok(f) => f,
+        Err(e) => {
+            return json_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("电脑上写不了那个目录：{e}"),
+            )
+        }
+    };
+    // take(上限+1)：Content-Length 是可以撒谎的，真正读到的字节数才作数。
+    // 请求体是个 Stream，先把它错误类型转成 io::Error、再用 tokio-util 的 StreamReader
+    // 包成 AsyncRead，才能交给 tokio::io::copy —— 全程不落内存。
+    use futures_util::TryStreamExt;
+    let stream = body.map_err(std::io::Error::other);
+    let mut src = tokio_util::io::StreamReader::new(stream).take(UPLOAD_MAX + 1);
+    let written = match tokio::io::copy(&mut src, &mut file).await {
+        Ok(n) => n,
+        Err(e) => {
+            drop(file);
+            let _ = tokio::fs::remove_file(&part).await;
+            return json_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("收的时候断了：{e}"),
+            );
+        }
+    };
+    drop(file);
+    let fail = |code: StatusCode, m: &str| {
+        let _ = std::fs::remove_file(&part);
+        json_err(code, m)
+    };
+    if written > UPLOAD_MAX {
+        return fail(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "实际收到的字节超过 100 MB，整个丢掉了。",
+        );
+    }
+    if written == 0 {
+        return fail(StatusCode::BAD_REQUEST, "一个字节都没收到。");
+    }
+    if written != len {
+        return fail(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "传了一半：说好 {}，实际到了 {}。",
+                store::human_size(len),
+                store::human_size(written)
+            ),
+        );
+    }
+    // 不覆盖同名原件：电脑上那份可能比手机上传的更重要
+    let final_name = store::unique_name(&dir, &name);
+    if let Err(e) = tokio::fs::rename(&part, dir.join(&final_name)).await {
+        let _ = tokio::fs::remove_file(&part).await;
+        return json_err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("落盘最后一步失败：{e}"),
+        );
+    }
+    let where_saved = if dest.sub.is_empty() {
+        final_name.clone()
+    } else {
+        format!("{}/{}", dest.sub.replace('\\', "/"), final_name)
+    };
+    let rec = store::UploadRecord {
+        ms: store::now_ms(),
+        dir: dest.dir,
+        sub: dest.sub,
+        name: final_name,
+        size: written,
+        ip: client_ip(&addr, &headers),
+    };
+    println!(
+        "[上传] {} · {} · 来自 {}",
+        rec.dir,
+        store::human_size(rec.size),
+        rec.ip
+    );
+    if let Err(e) = store::append_upload(&st.root, &rec) {
+        // 文件已经落盘了，记录写不进去不该让手机端看到失败
+        eprintln!("提示: 上传记录没写进去（{e}）");
+    }
+    (
+        StatusCode::OK,
+        Json(json!({"ok": true, "where": where_saved, "size": written})),
+    )
+        .into_response()
+}
+
 async fn api_feedback(
     State(st): State<Arc<AppState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -1578,7 +1947,9 @@ pub async fn serve(root: PathBuf, cfg: Config) -> anyhow::Result<()> {
         .route("/h/{token}/{idx}", get(html_frame))
         .route("/d/{token}/{idx}", get(dl_file))
         .route("/m/{token}/{idx}/{name}", get(preview_media))
+        .route("/upload", get(upload_page))
         .route("/api/feedback/{token}", axum::routing::post(api_feedback))
+        .route("/api/upload", axum::routing::post(api_upload))
         .layer(middleware::from_fn(security_headers))
         .with_state(st.clone());
     let bind = if cfg.bind.trim().is_empty() {
@@ -1684,6 +2055,130 @@ mod tests {
             csp_for("/m/deadbeef/0/a.png"),
             "sandbox; default-src 'none'"
         );
+    }
+
+    /// 回归测试：0.2.0 加严格 CSP 时没写 connect-src，于是它回落到
+    /// `default-src 'none'`，把同源的 fetch 和 XHR 一起挡了 —— 手机上「提交反馈」
+    /// 点了没反应，上传也发不出去。浏览器原话：Refused to connect because it
+    /// violates the document's Content Security Policy.
+    #[test]
+    fn app_pages_may_talk_to_their_own_origin() {
+        let csp = csp_for("/");
+        assert!(csp.contains("connect-src 'self'"), "{csp}");
+        assert!(csp.contains("default-src 'none'"), "{csp}");
+        // 表单也只能提交给自己
+        assert!(csp.contains("form-action 'self'"), "{csp}");
+        // 沙箱里的那两档不需要 connect-src：它们本来就不许发请求
+        assert!(!csp_for("/h/deadbeef/0").contains("connect-src"));
+        assert!(!csp_for("/raw/deadbeef/0").contains("connect-src"));
+    }
+
+    fn q(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn upload_target_only_ever_lands_inside_the_whitelist() {
+        let dir = std::env::temp_dir().join(format!("postbox-up-{}", store::now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let st = state("up");
+        let mut cfg = Config {
+            upload_dirs: vec![dir.display().to_string()],
+            ..st.cfg.clone()
+        };
+        // 没给目录序号 / 序号越界 / 目录不在白名单
+        assert!(upload_target(&cfg, &q(&[])).is_err());
+        assert!(upload_target(&cfg, &q(&[("d", "7"), ("n", "a.txt")])).is_err());
+        // 文件名和子目录里的分隔符与 `..` 都会被 sanitize 处理掉，拼完仍在白名单下
+        let d = upload_target(
+            &cfg,
+            &q(&[
+                ("d", "0"),
+                ("sub", "../../Windows"),
+                ("n", "..\\..\\secrets\\id_rsa"),
+            ]),
+        )
+        .unwrap();
+        for piece in [&d.name, &d.sub] {
+            assert!(
+                !piece.contains('/') && !piece.contains('\\') && !piece.contains(':'),
+                "{piece:?} 里不该还有路径分隔符"
+            );
+            assert!(!piece.is_empty());
+        }
+        assert!(d.target.starts_with(&dir), "{:?}", d.target);
+        assert_ne!(d.target, dir, "sub 非空时应该多一层");
+        // 空文件名不行，空的 sub 表示直接落在白名单目录
+        assert!(upload_target(&cfg, &q(&[("d", "0"), ("n", "   ")])).is_err());
+        let flat = upload_target(&cfg, &q(&[("d", "0"), ("sub", ""), ("n", "x.txt")])).unwrap();
+        assert_eq!(flat.target, dir);
+        assert_eq!(flat.sub, "");
+        // 白名单目录被删了要说清楚，而不是在别处凭空建一个
+        cfg.upload_dirs = vec![dir.join("gone").display().to_string()];
+        assert!(upload_target(&cfg, &q(&[("d", "0"), ("n", "x.txt")])).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&st.root).ok();
+    }
+
+    /// 上传页绝不能出现明文访问密钥 —— 和文件页同一条规矩。
+    #[test]
+    fn upload_page_never_leaks_access_key() {
+        let dir = std::env::temp_dir().join(format!("postbox-upage-{}", store::now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let st = state("upage");
+        let mut cfg = st.cfg.clone();
+        cfg.upload_dirs = vec![dir.display().to_string()];
+        let html = upload_form_html(&cfg);
+        assert!(!html.contains("SECRET-KEY-1234567890"), "{html}");
+        assert!(!html.contains("?key="), "{html}");
+        assert!(html.contains(&dir.display().to_string()));
+        assert!(html.contains("type=file"));
+        assert!(html.contains("100 MB"));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&st.root).ok();
+    }
+
+    #[test]
+    fn key_accepts_cookie_or_query_and_rejects_empty() {
+        let st = state("key");
+        let cfg = Config {
+            access_key: "abc123".into(),
+            ..st.cfg.clone()
+        };
+        assert!(key_matches(
+            &cfg,
+            &HeaderMap::new(),
+            &q(&[("key", "abc123")])
+        ));
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::COOKIE,
+            HeaderValue::from_static("x=1; pb_key=abc123"),
+        );
+        assert!(key_matches(&cfg, &h, &q(&[])));
+        assert!(!key_matches(&cfg, &HeaderMap::new(), &q(&[("key", "no")])));
+        assert!(!key_matches(&cfg, &HeaderMap::new(), &q(&[])));
+        // 没设密钥的配置等于拒绝所有人，而不是放开
+        let open = Config {
+            access_key: String::new(),
+            ..cfg.clone()
+        };
+        assert!(!key_matches(&open, &HeaderMap::new(), &q(&[("key", "")])));
+        std::fs::remove_dir_all(&st.root).ok();
+    }
+
+    #[test]
+    fn client_ip_trusts_cf_header_only_from_loopback() {
+        let mut h = HeaderMap::new();
+        h.insert("cf-connecting-ip", HeaderValue::from_static("203.0.113.9"));
+        let via_tunnel: SocketAddr = "127.0.0.1:5555".parse().unwrap();
+        assert_eq!(client_ip(&via_tunnel, &h), "203.0.113.9");
+        // 直接暴露到局域网时这个头能被伪造，所以不采信
+        let lan: SocketAddr = "192.168.1.50:5555".parse().unwrap();
+        assert_eq!(client_ip(&lan, &h), "192.168.1.50");
     }
 
     #[test]
@@ -2087,6 +2582,7 @@ mod tests {
                 ntfy_topic: "topic".into(),
                 cloudflared: "tools/cloudflared.exe".into(),
                 bind: "0.0.0.0".into(),
+                upload_dirs: vec![],
             },
             fb_hits: Mutex::new(HashMap::new()),
         })

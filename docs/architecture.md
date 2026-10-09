@@ -41,12 +41,20 @@ File delivery is streaming, and every file route (`/raw/`, `/d/`, `/z/`, `/m/`) 
 an `.mp4`/`.mov` whose index box sits at the end of the file is read from the tail instead of
 being downloaded whole. Nothing is buffered into memory on the way out.
 
+Uploads go the other way and are equally streamed: `POST /api/upload` takes the file as the
+request body, writes a `.part` beside the target and renames it only once the byte count
+checks out. The phone never sends a path — it picks one of `upload_dirs` by number, and both
+the subfolder name and the filename go through `sanitize_name`, so the worst a hostile client
+can do is ask for a folder that does not exist.
+
 ## Where the code lives
 
 ```
 src/main.rs     CLI surface (clap), subcommand dispatch
-src/store.rs    config, bundle metadata, publish, expiry housekeeping, feedback log
-src/serve.rs    axum routes, HTML pages, the CSS, Markdown rendering, previews
+src/store.rs    config, bundle metadata, publish, expiry housekeeping, feedback and
+                upload logs
+src/serve.rs    axum routes, HTML pages, the CSS, Markdown rendering, previews,
+                Range streaming and the upload endpoint
 src/office.rs   .docx → HTML (zip + quick-xml), .xlsx/.xls/.ods → HTML (calamine)
 src/tunnel.rs   spawn cloudflared, restart it with backoff, update base_url, push the link
 src/notify.rs   ntfy push through the system curl

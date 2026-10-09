@@ -16,6 +16,9 @@ base64 = "0.22"
 calamine = "0.36.1"
 chrono = "0.4"
 clap = { version = "4", features = ["derive"] }
+# axum-core 已经把它带进依赖树了，这里显式声明只为了 `StreamExt::map_err`：
+# 上传要把请求体当流读，错误类型得先转成 io::Error 才接得上 tokio-util 的 StreamReader
+futures-util = "0.3"
 mime_guess = "2"
 pulldown-cmark = "0.9"
 quick-xml = "0.42.0"

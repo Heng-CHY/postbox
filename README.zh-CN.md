@@ -58,6 +58,7 @@ macOS，单个文件、免安装、不用装 Rust
 | **预览** | Markdown、图片、PDF、音频、视频、代码、diff、`.docx`、`.xlsx/.xls/.ods`、`.csv/.tsv` 转表格、`.json` 缩进重排、`.zip`/`.tar.gz` 列内容清单，`.html` 报告在无脚本沙箱里渲染。音视频按 HTTP `Range` 分段发送，视频不必整段下完就能开播，进度条能拖 |
 | **下载 / 转发** | 文件名 UTF-8 正确；链接谁拿到都能打开，不用注册、不用装 App |
 | **反馈** | 页面底部一个输入框，内容追加进 `data/inbox/feedback.jsonl` |
+| **上传** | 反过来的方向：`postbox upload add D:\某个目录` 开一个目录，手机就能把文件推上去，还能现场指定一个小文件夹 |
 | **过期** | 文件包到期自动删除（默认 30 天，`--days 0` 永久保留） |
 | **agent 控制** | MCP stdio server，5 个工具；加固细节见 [SECURITY.md](SECURITY.md) |
 
@@ -119,9 +120,13 @@ curl.exe -L -o tools\cloudflared.exe https://github.com/cloudflare/cloudflared/r
 | `ntfy_server` | `https://ntfy.sh` | 自建 ntfy 就改成自己的地址 |
 | `ntfy_topic` | 随机 UUID | 手机订阅的主题；留空即关闭推送 |
 | `cloudflared` | `tools/cloudflared.exe` | 隧道程序路径，相对工作目录或绝对路径 |
+| `upload_dirs` | 空 | 手机可以上传进落的目录；用 `postbox upload` 管理，不建议手改 |
 
 * `base_url none` 清掉过期域名；只在内网用就设 `tunnel false`，手机直接访问
   `http://<电脑内网IP>:8712/?key=…`。
+* 上传的目标目录从来不由手机指定路径：页面上只按序号选一个，序号背后是 `upload_dirs`。
+  每条都得已经存在、是绝对路径、并且不在系统盘上（Windows 就是 `C:`，其他系统是整个根目录）
+  才收得进去。列表为空等于这个功能没开：首页不显示入口，接口也一律拒绝。
 * `data/` 就是这个系统的全部状态。用全局参数 `--root` 换位置，例如
   `postbox --root /srv/hub up`；也可以设一次 `POSTBOX_ROOT`，让命令在任何目录都找得到它。
   所有会发布的客户端必须指向同一个 root。
@@ -138,6 +143,8 @@ curl.exe -L -o tools\cloudflared.exe https://github.com/cloudflare/cloudflared/r
 | `up` | 网页服务 + 受监督的隧道，自动推送域名 |
 | `publish <文件…> [--title 标题] [--note 说明] [--days 30]` | 发布一个或多个文件，打印并推送链接 |
 | `inbox [-n 20]` | 查看手机提交的反馈 |
+| `upload add <目录>` / `upload list` / `upload rm <序号\|路径>` | 开放、查看、收回手机可上传的目录 |
+| `uploads [-n 20]` | 查看手机传进来过什么（只有流水，文件落在你指定的目录里） |
 | `token` | 打印完整的首页地址：`https://…/?key=<访问密钥>` |
 | `config <键> <值\|get>` | 读或写单个配置项 |
 | `notify-test` | 发一条测试推送 |
@@ -171,6 +178,10 @@ curl.exe -L -o tools\cloudflared.exe https://github.com/cloudflare/cloudflared/r
 * **隧道是公开的。** 它把你电脑的一个端口放到公网，要假定拿到 URL 的谁都可能访问到。
 * **装了 `publish_file` 的 agent 等于能把你电脑上任意文件发到公网。** 只在可信的客户端和
   工作区里注册这个服务。
+* **不开目录就没有上传。** 上传目标必须已经存在、是绝对路径、且不在系统盘上；手机上只能按
+  序号选，报不进任何路径。文件名一律 sanitize，同名不覆盖，请求体流式落盘并卡在 100 MB，
+  整条路由都要 `access_key`。但话说回来：**知道密钥的人就能往你开的那些目录里写东西**，
+  用完 `postbox upload rm` 收回。
 * **不往第三方上传任何东西。** 文件留在你磁盘上，只有手机真正请求的字节才穿过隧道；ntfy
   只携带链接文字。
 * 不可信文档是拆开来看、不是照单全收：每个响应带 CSP 和 `nosniff`，Markdown 里的原始 HTML
@@ -191,11 +202,14 @@ curl.exe -L -o tools\cloudflared.exe https://github.com/cloudflare/cloudflared/r
   这些干脆不给播放器，直接说明原因并把下载递到手上。单进程服务加上免费隧道带宽有限：传文档
   很爽，传 2 GB 视频很慢。
 * 本地端口没有 HTTPS，TLS 在隧道那一层终结。
+* 上传单个文件到 100 MB 为止：这是 Cloudflare 免费计划的请求体上限，超出的部分隧道那边就
+  拒了，到不了 postbox。更大的还是从电脑往手机发，或者把服务放到内网 / 自己的命名隧道下，
+  上限由你自己定。
 * 免费快速隧道每次重启换域名，旧链接随之失效。要固定地址就把它挂到自己的域名下（命名
   Cloudflare 隧道、Tailscale 或反向代理），`base_url` 自己设——代码不关心域名从哪来。
 * 网页界面**和命令行输出**都是中文；参数名、配置键、注释和文档中英双语。加一层 locale 是
   很好的第一个贡献，见 [`CONTRIBUTING.md`](CONTRIBUTING.md)。
-* 55 个单元测试 + 三个系统跑 CI，但没有浏览器自动化：页面在真机上长什么样仍然靠人看，所以
+* 64 个单元测试 + 三个系统跑 CI，但没有浏览器自动化：页面在真机上长什么样仍然靠人看，所以
   运维文档里带了一份验收清单。
 
 ## 相关文档

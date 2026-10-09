@@ -52,7 +52,8 @@ diff — and hands you a path like `D:\work\out\report.md`, useless from a train
 meeting. Remote desktop needs a good connection, chat apps need you to drag files around,
 cloud drives keep copies on someone else's server. `postbox` is the smallest thing that
 closes the loop: one call publishes your files as a link, your phone gets a push, and the
-note you type at the bottom of the page lands back in an inbox the agent can read.
+note you type at the bottom of the page lands back in an inbox the agent can read. Open one
+folder and the phone can send files the other way too.
 
 | | |
 | --- | --- |
@@ -60,6 +61,7 @@ note you type at the bottom of the page lands back in an inbox the agent can rea
 | **Preview** | Markdown, images, PDF, audio, video, code, diffs, `.docx`, `.xlsx/.xls/.ods`, `.csv/.tsv` as tables, indented `.json`, a file listing for `.zip`/`.tar.gz`, and `.html` reports rendered in a script-free sandbox. Media is served with HTTP `Range`, so video starts without the whole file arriving first and the seek bar works |
 | **Download / forward** | correct UTF-8 filenames; the link works for anyone, no account, no app |
 | **Feedback** | a note box on the page, appended to `data/inbox/feedback.jsonl` |
+| **Upload** | the other direction: open a folder with `postbox upload add D:\somewhere` and the phone can push files into it, into a subfolder you name on the spot |
 | **Expiry** | bundles self-delete (30 days by default, `--days 0` to keep forever) |
 | **Agent control** | an MCP stdio server with 5 tools; hardening covered in [SECURITY.md](SECURITY.md) |
 
@@ -125,9 +127,14 @@ Everything lives in `data/config.json`. Read or set a value with
 | `ntfy_server` | `https://ntfy.sh` | point at your own ntfy instance if you run one |
 | `ntfy_topic` | random UUID | the topic your phone subscribes to; empty disables pushes |
 | `cloudflared` | `tools/cloudflared.exe` | path to the tunnel binary, relative to the working dir or absolute |
+| `upload_dirs` | *(empty)* | folders the phone may upload into; managed with `postbox upload`, not by hand |
 
 * `base_url none` clears a stale hostname; `tunnel false` is for a LAN-only setup (then use
   `http://<pc-ip>:8712/?key=…` from your phone).
+* Upload targets are never typed by the phone: the page picks one by number out of
+  `upload_dirs`, and each entry has to exist and stay off the system drive (`C:` on Windows,
+  `/` elsewhere) before it will be accepted. Empty list means the feature is off — no entry
+  on the home page, and the API refuses everything.
 * `data/` is the whole state of the system. Move it with `--root`, e.g.
   `postbox --root /srv/hub up`, or set `POSTBOX_ROOT` once so the command finds that folder
   from anywhere. Every client that publishes must share one root.
@@ -146,6 +153,8 @@ Everything lives in `data/config.json`. Read or set a value with
 | `up` | web server + supervised tunnel, auto-push the hostname |
 | `publish <files…> [--title T] [--note N] [--days 30]` | publish one or more files, print the link, push it |
 | `inbox [-n 20]` | show feedback submitted from the phone |
+| `upload add <dir>` / `upload list` / `upload rm <index\|path>` | open, list or revoke an upload target |
+| `uploads [-n 20]` | show what the phone has sent in (metadata only — files land where you pointed them) |
 | `token` | print the full home page URL, `https://…/?key=<access key>` |
 | `config <key> <value\|get>` | read or write one config field |
 | `notify-test` | send a test push |
@@ -183,6 +192,11 @@ a 404: **[docs/agent-integration.md](docs/agent-integration.md)**.
   reachable by whoever finds its URL.
 * **An agent with `publish_file` can exfiltrate any file on your computer.** Register this
   server only in clients and workspaces you trust.
+* **Upload is off until you open a folder.** A target has to exist, be absolute and stay off
+  the system drive; the phone picks one by number and never names a path of its own. Names
+  are sanitized, an existing file is never overwritten, the body streams to disk under a
+  100 MB cap, and the whole route requires `access_key`. Which still means: whoever holds the
+  key can write into the folders you opened — `postbox upload rm` them when you are done.
 * **Nothing is stored on a third party.** Files stay on your disk; only bytes the phone
   actually requested cross the tunnel, and ntfy carries the link text alone.
 * Untrusted documents are parsed, not trusted: CSP + `nosniff` on every response, raw HTML
@@ -209,13 +223,17 @@ What is by design, what to report privately, and how to harden further:
   hands you the download. Single-process serving plus a bandwidth-limited free tunnel: fine
   for documents, slow for a 2 GB video.
 * No HTTPS on the local port — TLS terminates at the tunnel.
+* Uploads stop at 100 MB per file: that is Cloudflare's free-plan request-body limit, so the
+  tunnel refuses a bigger one before the bytes reach `postbox`. Send large things the other
+  way (publish from the PC) or put the server on a LAN / your own tunnel where the cap is
+  yours to set.
 * Free quick tunnels change hostname on every restart, so old links die. Need a stable URL?
   Put the server behind your own domain, a named Cloudflare tunnel or Tailscale and set
   `base_url` yourself — the code does not care where the hostname comes from.
 * The web UI **and the CLI output** are Chinese; flags, config keys, comments and docs are
   bilingual. A locale layer is a good first contribution — see
   [`CONTRIBUTING.md`](CONTRIBUTING.md).
-* 55 unit tests and CI on three OSes, but no browser automation: what a page looks like on a
+* 64 unit tests and CI on three OSes, but no browser automation: what a page looks like on a
   real phone is still checked by hand, which is why the operations doc carries an acceptance
   checklist.
 

@@ -29,6 +29,13 @@ fn cfg_display(cfg: &store::Config, key: &str) -> String {
         "cloudflared" => cfg.cloudflared.clone(),
         "base_url" => cfg.base_url.clone().unwrap_or_else(|| "(none)".into()),
         "access_key" => cfg.access_key.clone(),
+        "upload_dirs" => {
+            if cfg.upload_dirs.is_empty() {
+                "(没开放)".into()
+            } else {
+                cfg.upload_dirs.join(", ")
+            }
+        }
         _ => String::new(),
     }
 }
@@ -81,6 +88,16 @@ enum Cmd {
         #[command(subcommand)]
         action: AutostartAction,
     },
+    /// 手机 → 电脑 上传：管理允许落盘的目录
+    Upload {
+        #[command(subcommand)]
+        action: UploadAction,
+    },
+    /// 查看手机上传过来的文件记录
+    Uploads {
+        #[arg(short, long, default_value_t = 20)]
+        n: usize,
+    },
     /// 以 MCP stdio 服务器方式运行（供 Qoder 等客户端注册）
     Mcp,
     /// 打印首页链接（含访问密钥，公网地址未就绪时给本机地址）
@@ -91,6 +108,16 @@ enum Cmd {
 enum AutostartAction {
     Install,
     Uninstall,
+}
+
+#[derive(Subcommand)]
+enum UploadAction {
+    /// 开放一个目录给手机上传（必须已存在，且不能在系统盘上）
+    Add { path: PathBuf },
+    /// 列出已开放的目录
+    List,
+    /// 收回一个目录：给序号（`upload list` 里的编号）或完整路径
+    Rm { which: String },
 }
 
 /// 数据目录的优先级：`--root` > 环境变量 `POSTBOX_ROOT` > 当前目录下的 `data/`。
@@ -287,6 +314,7 @@ async fn main() -> Result<()> {
                     "cloudflared" => cfg.cloudflared.clone(),
                     "base_url" => cfg.base_url.clone().unwrap_or_else(|| "(none)".into()),
                     "access_key" => cfg.access_key.clone(),
+                    "upload_dirs" => cfg.upload_dirs.join(", "),
                     _ => bail!("未知配置项: {key}"),
                 };
                 println!("{v}");
@@ -382,6 +410,101 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Cmd::Upload { action } => {
+            let cfg = store::load_config(&root)?;
+            let base = cfg
+                .base_url
+                .clone()
+                .unwrap_or_else(|| format!("http://127.0.0.1:{}", cfg.port));
+            match action {
+                UploadAction::Add { path } => {
+                    let abs = store::validate_upload_dir(&path)?;
+                    if cfg.upload_dirs.iter().any(|d| d == &abs) {
+                        println!("已经在白名单里: {abs}");
+                    } else {
+                        if cfg.upload_dirs.len() >= store::MAX_UPLOAD_DIRS {
+                            anyhow::bail!(
+                                "最多开放 {} 个目录，先用 postbox upload rm <编号> 收一个",
+                                store::MAX_UPLOAD_DIRS
+                            );
+                        }
+                        store::update_config(&root, |c| {
+                            c.upload_dirs.push(abs.clone());
+                            Ok(())
+                        })?;
+                        println!("已开放: {abs}");
+                        println!(
+                            "上传页: {base}/upload?key={}（服务在跑的话立刻生效，不用重启）",
+                            cfg.access_key
+                        );
+                    }
+                }
+                UploadAction::List => {
+                    if cfg.upload_dirs.is_empty() {
+                        println!(
+                            "还没有开放任何目录，手机端上传等于没开。\n\
+                             开放一个: postbox upload add D:\\手机传上来"
+                        );
+                    }
+                    for (i, d) in cfg.upload_dirs.iter().enumerate() {
+                        let p = std::path::PathBuf::from(d);
+                        let note = if !p.is_dir() {
+                            "  ← 这个目录现在不存在，手机选它会报错"
+                        } else if store::is_system_volume(&p) {
+                            "  ← 在系统盘上，建议收回"
+                        } else {
+                            ""
+                        };
+                        println!("[{i}] {d}{note}");
+                    }
+                }
+                UploadAction::Rm { which } => {
+                    let idx: Option<usize> = which.parse().ok();
+                    let find = |dirs: &[String]| -> Option<usize> {
+                        if let Some(i) = idx {
+                            return if i < dirs.len() { Some(i) } else { None };
+                        }
+                        let want = which.trim_end_matches(['/', '\\']);
+                        dirs.iter().position(|d| {
+                            let d = d.trim_end_matches(['/', '\\']);
+                            d.eq_ignore_ascii_case(want)
+                        })
+                    };
+                    if find(&cfg.upload_dirs).is_none() {
+                        anyhow::bail!("白名单里没有找到 {which}（用 postbox upload list 看编号）");
+                    }
+                    let removed = store::update_config(&root, |c| {
+                        if let Some(i) = find(&c.upload_dirs) {
+                            c.upload_dirs.remove(i);
+                        }
+                        Ok(())
+                    })?
+                    .upload_dirs
+                    .clone();
+                    println!("已收回。现在还剩 {} 个目录。", removed.len());
+                    if removed.is_empty() {
+                        println!("目录清空后手机端就没有上传入口了。");
+                    }
+                }
+            }
+        }
+        Cmd::Uploads { n } => {
+            let list = store::list_uploads(&root, n);
+            if list.is_empty() {
+                println!("还没有手机上传过文件。");
+            }
+            for u in list.into_iter().rev() {
+                println!(
+                    "[{}] {}\\{} · {} ({}) · 来自 {}",
+                    store::fmt_time(u.ms),
+                    u.dir,
+                    u.sub,
+                    u.name,
+                    store::human_size(u.size),
+                    if u.ip.is_empty() { "?" } else { &u.ip }
+                );
+            }
+        }
         Cmd::Mcp => {
             store::init_root(&root)?;
             mcp::run(root)?;
@@ -468,6 +591,7 @@ mod config_tests {
             ntfy_topic: "topic".into(),
             cloudflared: "tools/cloudflared.exe".into(),
             bind: "0.0.0.0".into(),
+            upload_dirs: vec![],
         }
     }
 

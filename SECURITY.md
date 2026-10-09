@@ -47,6 +47,16 @@ threat model. Reading it before filing an issue saves everyone time.
   box can write into it — hence the rate limit (6 notes/minute per client, keyed on
   `CF-Connecting-IP` because cloudflared makes every request arrive from 127.0.0.1) and
   the 4 MB cap with rotation.
+* **Upload is off until you open a folder, and then it is internet-writable by whoever
+  holds the access key.** `upload_dirs` starts empty: no entry on the home page, and
+  `POST /api/upload` has no target to write to. Once you `postbox upload add D:\somewhere`,
+  that folder accepts files from any client that presents `access_key` — the key is the whole
+  authentication. What the endpoint does enforce: the target must be one of the whitelisted
+  entries picked by index (the phone never sends a path), the subfolder and file names pass
+  through `sanitize_name` so `/`, `\`, `..` and `:` cannot escape the folder, an existing file
+  is never overwritten (`名字 (1).ext` instead), the body streams to a `.part` under a hard
+  100 MB cap and is renamed only when the byte count matches. Revoke the folders with
+  `postbox upload rm` when you are done; `upload list` shows what is currently open.
 * **Preview pages run your document's content.** Markdown is rendered with raw HTML
   disabled and `javascript:` / `vbscript:` / `data:text/html` links neutralised,
   `.docx` is parsed into a controlled subset, and every response carries a

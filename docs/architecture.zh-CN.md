@@ -37,12 +37,16 @@ agent   │  postbox mcp ──写入──▶ data/                │
 进度条，就是按要的字节回一段 `206`；`moov` box 在末尾的 `.mp4`/`.mov` 也先去读尾巴，不必
 把整个文件传完才开播。发送过程中不会把文件吞进内存。
 
+上传是反过来的方向，同样流式：`POST /api/upload` 把文件当请求体收，先写到目标旁边的
+`.part`，字节数核对无误才改名。手机侧永远不送路径 —— 它只能按序号选 `upload_dirs` 里的某一条，
+子目录名和文件名都过 `sanitize_name`，所以恶意客户端能做到最坏的事也就是要一个不存在的目录。
+
 ## 代码放在哪
 
 ```
 src/main.rs     命令行入口（clap）、子命令分发
-src/store.rs    配置、文件包元数据、发布、过期清理、反馈日志
-src/serve.rs    axum 路由、页面 HTML、CSS、Markdown 渲染、各类预览
+src/store.rs    配置、文件包元数据、发布、过期清理、反馈与上传流水
+src/serve.rs    axum 路由、页面 HTML、CSS、Markdown 渲染、各类预览、分段发送与上传接口
 src/office.rs   .docx → HTML（zip + quick-xml）、.xlsx/.xls/.ods → HTML（calamine）
 src/tunnel.rs   拉起 cloudflared、失败时退避重启、解析域名回写 base_url、把链接推给手机
 src/notify.rs   通过系统 curl 推 ntfy

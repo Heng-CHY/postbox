@@ -8,6 +8,22 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- The other direction: **the phone can send files to the computer.** `postbox upload add
+  D:\somewhere` opens a folder, `/upload` lists the open folders for the phone to pick from
+  with an optional subfolder (today's date by default), and each file streams straight to disk
+  — no multipart dependency, nothing buffered. `postbox upload list` / `upload rm` manage the
+  whitelist, `postbox uploads` shows what came in. An empty whitelist means the feature does
+  not exist: no entry on the home page, and the API has nowhere to write.
+  - A target has to exist, be absolute, and stay off the system drive (`C:` on Windows, the
+    root filesystem elsewhere) before `upload add` accepts it.
+  - The phone picks a folder by index and never sends a path; subfolder and file names go
+    through `sanitize_name`, and the result is asserted to stay under the chosen entry.
+  - An existing file is never overwritten: `报告.pdf` becomes `报告 (1).pdf`.
+  - 100 MB per file, which is also Cloudflare's free-plan request-body cap; the page says so
+    before the transfer instead of dying at 90%.
+  - Uploads require `access_key`, and metadata (time, folder, name, size, client IP) is
+    appended to `data/inbox/uploads.jsonl`. No copy is kept in `data/` — the file lands where
+    you pointed it and nowhere else.
 - HTTP `Range` on every file route (`/raw/`, `/d/`, `/z/`, `/m/`): `206 Partial Content` with
   `Content-Range` and a declared `Accept-Ranges: bytes`, `416` with `bytes */<size>` when the
   requested range starts past the end of the file. This is what makes in-page video work —
@@ -39,9 +55,18 @@ All notable changes to this project are documented here. The format follows
   a `.ts` source file is the more common thing an agent publishes here.
 - `/m/` (the images pulled out of a `.docx`) now goes through the same sender as the other
   file routes instead of carrying its own copy.
-- The test suite grows from 46 to 55 tests: range planning, container classification, the
-  media `Content-Type` overrides, and two page-level tests that publish a clip and read back
-  the rendered player.
+- The test suite grows from 46 to 64 tests: range planning, container classification, the
+  media `Content-Type` overrides, two page-level tests that publish a clip and read back the
+  rendered player, and the upload whitelist (path traversal, index-out-of-range, missing key,
+  system-drive refusal, name collision).
+
+### Fixed
+
+- **The 提交反馈 button worked again.** 0.2.0 put `default-src 'none'` in the page CSP without
+  a `connect-src`, so it became the fallback for XHR and `fetch` too: every same-origin request
+  from a page was blocked by the browser ("Refused to connect because it violates the
+  document's Content Security Policy"), which silently killed feedback submission on the phone.
+  App pages now declare `connect-src 'self'`; the sandboxed routes keep refusing requests.
 
 ## [0.2.0] — 2026-09-30
 
