@@ -24,10 +24,6 @@ const FB_PER_MIN: u32 = 6;
 const TEXT_PREVIEW_MAX: u64 = 512 * 1024;
 /// Word / 表格页内解析上限
 const OFFICE_PREVIEW_MAX: u64 = 20 * 1024 * 1024;
-/// 手机上传的单文件上限。这个数字不是保守，是天花板：Cloudflare 免费计划的
-/// 请求体上限就是 100 MB，超了它在隧道那一层直接回 413，根本到不了这里。
-/// 页面提前拦住，是为了让人看到一句人话而不是「传到 90% 断了」。
-const UPLOAD_MAX: u64 = 100 * 1024 * 1024;
 
 pub struct AppState {
     pub root: PathBuf,
@@ -333,7 +329,12 @@ fn cookie_key(headers: &HeaderMap) -> String {
         .and_then(|raw| {
             raw.split(';')
                 .map(|s| s.trim())
-                .find_map(|kv| kv.strip_prefix("pb_key=").map(|v| v.to_string()))
+                // 只认非空的那一条：一个残留的 `pb_key=`（值为空）不该把后面有效的挡掉
+                .find_map(|kv| {
+                    kv.strip_prefix("pb_key=")
+                        .filter(|v| !v.is_empty())
+                        .map(|v| v.to_string())
+                })
         })
         .unwrap_or_default()
 }
@@ -397,7 +398,7 @@ fn home_body(
     let upload = if cfg.upload_dirs.is_empty() {
         String::new()
     } else {
-        "<div class=card><h2>传到电脑上</h2><p class=hint>方向是 手机 → 电脑：选一个电脑上开好的目录，把手机里的照片、录音、文档推上去。单个文件 100 MB 以内。</p><a class=btn href=\"/upload\">打开上传页</a></div>".to_string()
+        format!("<div class=card><h2>传到电脑上</h2><p class=hint>方向是 手机 → 电脑：选一个电脑上开好的目录，把手机里的照片、录音、文档推上去。单个文件 {} 以内。</p><a class=btn href=\"/upload\">打开上传页</a></div>", mb_label(cfg.upload_max_mb))
     };
     let body = format!(
         "<header class=top><h1>文件寄递台</h1><span class=badge>共 {} 项</span></header>\
@@ -1537,6 +1538,15 @@ fn key_matches(cfg: &Config, headers: &HeaderMap, q: &HashMap<String, String>) -
     !cfg.access_key.is_empty() && key == cfg.access_key
 }
 
+/// 「100 MB」/「1.5 GB」这种写法，页面和报错都用它，别到处手拼
+fn mb_label(mb: u32) -> String {
+    if mb.is_multiple_of(1024) {
+        format!("{} GB", mb / 1024)
+    } else {
+        format!("{mb} MB")
+    }
+}
+
 fn json_err(code: StatusCode, msg: &str) -> Response {
     (code, Json(json!({"ok": false, "error": msg}))).into_response()
 }
@@ -1568,11 +1578,23 @@ fn upload_target(
     let Some(dir) = cfg.upload_dirs.get(idx) else {
         return bad("那个目录已经不在白名单里了，刷新页面重选一个");
     };
-    let base = std::path::PathBuf::from(dir);
-    if !base.is_dir() {
+    let configured = std::path::PathBuf::from(dir);
+    // canonicalize 会把 junction / 符号链接解开。白名单本身是电脑端写的（能改 config.json
+    // 的人本来就能改密钥，属于本机可信范围），这里要防的是「登记之后有人把那个目录换成了
+    // 指向系统盘的链接」—— 解析结果和登记值不一样、又落在系统盘上，就拒绝。
+    let base = match std::fs::canonicalize(&configured) {
+        Ok(b) => store::clean_abs(&b),
+        Err(_) => {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "电脑上那个目录现在不存在了，让电脑端 postbox upload list 看一眼".to_string(),
+            ))
+        }
+    };
+    if base != configured && store::is_system_volume(&base) {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
-            "电脑上那个目录现在不存在了，让电脑端 postbox upload list 看一眼".to_string(),
+            "那个目录现在指向了系统盘（被换成了链接），先在电脑上重新 upload add 一次".to_string(),
         ));
     }
     let raw_sub = q.get("sub").map(|s| s.trim()).unwrap_or("");
@@ -1657,25 +1679,26 @@ fn upload_form_html(cfg: &Config) -> String {
     format!(
         r#"<header class=top><a class=back href="/">← 全部文件</a><span class=badge>手机 → 电脑</span></header>
 <div class=card><h1>传到电脑上</h1>
-<p class=hint>选目录、选文件，然后点上传。单个文件 100 MB 以内 —— 公网隧道那一层的上限就是这个数，超了它自己也拒收。</p>
+<p class=hint>选目录、选文件，然后点上传。单个文件 {cap} 以内。走公网隧道时真正的墙是时间：Cloudflare 大约 150 秒就会掐断一个请求，传两三分钟的大文件请连同一个 Wi-Fi 直接传（http://电脑内网IP:端口/upload）。</p>
 <h3 class=sub>存到哪个目录</h3>{dirs}
 <h3 class=sub>再放进哪个小文件夹（可选）</h3>
 <input id=sub value="{today}" style="width:100%;padding:10px;border:1px solid var(--line);border-radius:8px;font:inherit">
 <p class=muted>默认按今天的日期建一层，方便归档；不想分层就把它清空。</p>
 <h3 class=sub>选文件</h3>
-<p><label class=btn>选文件<input id=f type=file multiple hidden></label>
-<label class=btn>拍照 / 录像<input id=c type=file accept="image/*,video/*" hidden></label></p>
+<p><label class=btn>选文件<input id=f type=file multiple hidden onchange=names()></label>
+<label class=btn>拍照 / 录像<input id=c type=file accept="image/*,video/*" hidden onchange=names()></label></p>
 <p id=names class=muted>还没选。</p>
 <ul class=upl id=ul></ul>
 <button class=btn id=go onclick=go() style="width:100%">上传</button>
 </div>{toast}<script>{JS}</script>"#,
+        cap = mb_label(cfg.upload_max_mb),
         toast = toast_js(),
-        JS = UPLOAD_JS
+        JS = UPLOAD_JS.replace("__MAXB__", &cfg.upload_max_mb.to_string())
     )
 }
 
 const UPLOAD_JS: &str = r#"
-const MAXB=104857600;
+const MAXB=__MAXB__*1048576;
 function fmt(n){if(n<1024)return n+' B';if(n<1048576)return (n/1024).toFixed(1)+' KB';return (n/1048576).toFixed(1)+' MB'}
 function esc(s){return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
 function picked(){return [...document.getElementById('f').files,...document.getElementById('c').files]}
@@ -1694,7 +1717,7 @@ async function go(){
     const bar=document.createElement('i');const bw=document.createElement('div');bw.className='bar';bw.append(bar);
     const st=document.createElement('div');
     li.append(t,bw,st);list.append(li);
-    if(fl.size>MAXB){st.innerHTML='<span class=bad>超过 100 MB，跳过。这种还是先用电脑往手机发，或者换 Tailscale。</span>';bad++;continue}
+    if(fl.size>MAXB){st.innerHTML='<span class=bad>超过上限，跳过。这种还是先用电脑往手机发。</span>';bad++;continue}
     bar.style.width='2%';
     const r=await one(fl,dir.value,sub,bar);
     if(r.ok){ok++;bar.style.width='100%';st.innerHTML='<span class=ok>已存到 '+esc(r.where)+'</span>'}
@@ -1750,11 +1773,13 @@ async fn api_upload(
     if len == 0 {
         return json_err(StatusCode::BAD_REQUEST, "这个文件是空的。");
     }
-    if len > UPLOAD_MAX {
+    let max = cfg.upload_max_mb as u64 * 1024 * 1024;
+    if len > max {
         return json_err(
             StatusCode::PAYLOAD_TOO_LARGE,
             &format!(
-                "单个文件上限 100 MB（Cloudflare 免费隧道那一层就卡这个数），这个 {}。",
+                "单个文件上限 {}，这个 {}。电脑上可以用 postbox config upload_max_mb <MB> 调。",
+                mb_label(cfg.upload_max_mb),
                 store::human_size(len)
             ),
         );
@@ -1783,10 +1808,24 @@ async fn api_upload(
     // 包成 AsyncRead，才能交给 tokio::io::copy —— 全程不落内存。
     use futures_util::TryStreamExt;
     let stream = body.map_err(std::io::Error::other);
-    let mut src = tokio_util::io::StreamReader::new(stream).take(UPLOAD_MAX + 1);
-    let written = match tokio::io::copy(&mut src, &mut file).await {
-        Ok(n) => n,
-        Err(e) => {
+    let mut src = tokio_util::io::StreamReader::new(stream).take(max + 1);
+    // 30 分钟总时限：不设的话，一个每 50 秒滴 1 字节的客户端能把任务、socket 和
+    // .part 句柄一直挂在那里
+    let written = match tokio::time::timeout(
+        Duration::from_secs(1800),
+        tokio::io::copy(&mut src, &mut file),
+    )
+    .await
+    {
+        Err(_) => {
+            drop(file);
+            let _ = tokio::fs::remove_file(&part).await;
+            return json_err(
+                StatusCode::REQUEST_TIMEOUT,
+                "传得太慢了（30 分钟没传完），这次丢掉了。",
+            );
+        }
+        Ok(Err(e)) => {
             drop(file);
             let _ = tokio::fs::remove_file(&part).await;
             return json_err(
@@ -1794,16 +1833,20 @@ async fn api_upload(
                 &format!("收的时候断了：{e}"),
             );
         }
+        Ok(Ok(n)) => n,
     };
     drop(file);
     let fail = |code: StatusCode, m: &str| {
         let _ = std::fs::remove_file(&part);
         json_err(code, m)
     };
-    if written > UPLOAD_MAX {
+    if written > max {
         return fail(
             StatusCode::PAYLOAD_TOO_LARGE,
-            "实际收到的字节超过 100 MB，整个丢掉了。",
+            &format!(
+                "实际收到的字节超过 {}，整个丢掉了。",
+                mb_label(cfg.upload_max_mb)
+            ),
         );
     }
     if written == 0 {
@@ -1819,8 +1862,39 @@ async fn api_upload(
             ),
         );
     }
-    // 不覆盖同名原件：电脑上那份可能比手机上传的更重要
-    let final_name = store::unique_name(&dir, &name);
+    // 不覆盖同名原件：电脑上那份可能比手机上传的更重要。
+    // 只靠「先看存不存在、再改名」在并发下会互相覆盖（POSIX 的 rename 直接替换），
+    // 所以这里用 create_new 把名字原子地抢下来；抢不到就换一个名字重试。
+    let mut final_name: Option<String> = None;
+    for _ in 0..50 {
+        let candidate = store::unique_name(&dir, &name);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(dir.join(&candidate))
+        {
+            Ok(_) => {
+                final_name = Some(candidate);
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                let _ = tokio::fs::remove_file(&part).await;
+                return json_err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("电脑上写不了那个目录：{e}"),
+                );
+            }
+        }
+    }
+    let Some(final_name) = final_name else {
+        let _ = tokio::fs::remove_file(&part).await;
+        return json_err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "同名文件太多，换个文件名再传。",
+        );
+    };
+    // 占位是个空文件，rename 覆盖它覆盖的是自己抢到的名字
     if let Err(e) = tokio::fs::rename(&part, dir.join(&final_name)).await {
         let _ = tokio::fs::remove_file(&part).await;
         return json_err(
@@ -2085,8 +2159,12 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("postbox-up-{}", store::now_ms()));
         std::fs::create_dir_all(&dir).unwrap();
         let st = state("up");
+        // 白名单里存的是 `upload add` 实际会写进去的那种值（解析过的绝对路径）
+        let canonical = store::clean_abs(&std::fs::canonicalize(&dir).unwrap())
+            .display()
+            .to_string();
         let mut cfg = Config {
-            upload_dirs: vec![dir.display().to_string()],
+            upload_dirs: vec![canonical.clone()],
             ..st.cfg.clone()
         };
         // 没给目录序号 / 序号越界 / 目录不在白名单
@@ -2109,12 +2187,16 @@ mod tests {
             );
             assert!(!piece.is_empty());
         }
-        assert!(d.target.starts_with(&dir), "{:?}", d.target);
-        assert_ne!(d.target, dir, "sub 非空时应该多一层");
+        assert!(d.target.starts_with(&canonical), "{:?}", d.target);
+        assert_ne!(
+            d.target,
+            std::path::PathBuf::from(&canonical),
+            "sub 非空时应该多一层"
+        );
         // 空文件名不行，空的 sub 表示直接落在白名单目录
         assert!(upload_target(&cfg, &q(&[("d", "0"), ("n", "   ")])).is_err());
         let flat = upload_target(&cfg, &q(&[("d", "0"), ("sub", ""), ("n", "x.txt")])).unwrap();
-        assert_eq!(flat.target, dir);
+        assert_eq!(flat.target, std::path::PathBuf::from(&canonical));
         assert_eq!(flat.sub, "");
         // 白名单目录被删了要说清楚，而不是在别处凭空建一个
         cfg.upload_dirs = vec![dir.join("gone").display().to_string()];
@@ -2583,6 +2665,7 @@ mod tests {
                 cloudflared: "tools/cloudflared.exe".into(),
                 bind: "0.0.0.0".into(),
                 upload_dirs: vec![],
+                upload_max_mb: store::UPLOAD_MAX_DEFAULT_MB,
             },
             fb_hits: Mutex::new(HashMap::new()),
         })

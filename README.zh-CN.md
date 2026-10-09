@@ -121,6 +121,7 @@ curl.exe -L -o tools\cloudflared.exe https://github.com/cloudflare/cloudflared/r
 | `ntfy_topic` | 随机 UUID | 手机订阅的主题；留空即关闭推送 |
 | `cloudflared` | `tools/cloudflared.exe` | 隧道程序路径，相对工作目录或绝对路径 |
 | `upload_dirs` | 空 | 手机可以上传进落的目录；用 `postbox upload` 管理，不建议手改 |
+| `upload_max_mb` | `100` | 单个上传文件的上限。调大只在隧道之外有意义：Cloudflare 免费计划对请求体就卡 100 MB，应用说多少都没用 |
 
 * `base_url none` 清掉过期域名；只在内网用就设 `tunnel false`，手机直接访问
   `http://<电脑内网IP>:8712/?key=…`。
@@ -202,9 +203,12 @@ curl.exe -L -o tools\cloudflared.exe https://github.com/cloudflare/cloudflared/r
   这些干脆不给播放器，直接说明原因并把下载递到手上。单进程服务加上免费隧道带宽有限：传文档
   很爽，传 2 GB 视频很慢。
 * 本地端口没有 HTTPS，TLS 在隧道那一层终结。
-* 上传单个文件到 100 MB 为止：这是 Cloudflare 免费计划的请求体上限，超出的部分隧道那边就
-  拒了，到不了 postbox。更大的还是从电脑往手机发，或者把服务放到内网 / 自己的命名隧道下，
-  上限由你自己定。
+* 走公网隧道时卡住你的是**时间，不是体积**。Cloudflare 大约 150–170 秒就会掐断一个请求
+  （HTTP 524），而这条隧道在这台机器上实测只有 1.5 MB/s 上下。所以量出来是：60 MB 三次全过、
+  200 MB 三次全过、300 MB 两次都挂在 170 秒。`upload_max_mb`（默认 100，可设到 2048）只是
+  应用自己的闸门，调大了隧道那边照样说了算。隧道之外就没这回事：同一份代码内网直连测过
+  200 MB 用 4.0 秒、300 MB 用 4.8 秒，所以大文件该走同一个 Wi-Fi
+  （`http://<电脑内网IP>:8712/upload`）或者 Tailscale。
 * 免费快速隧道每次重启换域名，旧链接随之失效。要固定地址就把它挂到自己的域名下（命名
   Cloudflare 隧道、Tailscale 或反向代理），`base_url` 自己设——代码不关心域名从哪来。
 * 网页界面**和命令行输出**都是中文；参数名、配置键、注释和文档中英双语。加一层 locale 是

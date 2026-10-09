@@ -23,6 +23,17 @@ fn default_bind() -> String {
     "0.0.0.0".into()
 }
 
+/// 上传默认上限。定在 100 MB 是保守：走免费隧道时真正卡住的是 Cloudflare 大约 150~170 秒的
+/// 请求时限（实测 1.5 MB/s 下 200 MB 能过、300 MB 过不去），默认值让人不必先猜。
+/// 内网直连或 Tailscale 场景下往上调才有意义，也才真的用得上。
+pub const UPLOAD_MAX_DEFAULT_MB: u32 = 100;
+/// 配置项允许写到的天花板，防止手滑写成 100000 之类
+pub const UPLOAD_MAX_LIMIT_MB: u32 = 2048;
+
+fn default_upload_max_mb() -> u32 {
+    UPLOAD_MAX_DEFAULT_MB
+}
+
 /// 全局配置，存于 data/config.json
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -46,6 +57,10 @@ pub struct Config {
     /// 空列表等于这个功能没开：首页不显示入口，接口也没有可选目标。
     #[serde(default)]
     pub upload_dirs: Vec<String>,
+    /// 单个上传文件的上限（MB）。走免费隧道时超过 100 会被 Cloudflare 挡在外面，
+    /// 但内网直连或 Tailscale 场景下这个数由你自己定。
+    #[serde(default = "default_upload_max_mb")]
+    pub upload_max_mb: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,22 +140,47 @@ pub fn human_size(bytes: u64) -> String {
     }
 }
 
+/// 文件名 / 子目录名消毒。分隔符、`..`、`:`（NTFS 备用流）和控制字符都换成 `_`，
+/// 首尾的空和点也去掉 —— Windows 自己会抹掉它们，留着的话记录里的名字和磁盘上的不一致。
 pub fn sanitize_name(name: &str) -> String {
     let mut out = String::new();
     for c in name.chars() {
         if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || (c as u32) < 32 {
             out.push('_');
+        } else if c == '~' {
+            // `SECRE~1.TXT` 这种 8.3 短名会解析到别的文件上，「绝不覆盖」那条保证就假了
+            out.push('_');
         } else {
             out.push(c);
         }
     }
-    let out = out.trim().trim_matches('.').to_string();
-    if out.is_empty() {
+    let out = out
+        .trim()
+        .trim_matches('.')
+        .trim_end_matches(' ')
+        .to_string();
+    let out = if out.is_empty() {
         "file".to_string()
     } else if out.chars().count() > 120 {
         out.chars().take(120).collect()
     } else {
         out
+    };
+    dodge_reserved_name(out)
+}
+
+/// `CON`、`NUL`、`aux.cs` 这类 Windows 保留设备名：创建会失败或者写到别处去，前面加个下划线。
+fn dodge_reserved_name(s: String) -> String {
+    let stem = s.split('.').next().unwrap_or("").to_ascii_uppercase();
+    let serial = |p: &str| {
+        stem.strip_prefix(p)
+            .and_then(|r| r.parse::<u32>().ok())
+            .is_some_and(|n| (1..=9).contains(&n))
+    };
+    if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") || serial("COM") || serial("LPT") {
+        format!("_{s}")
+    } else {
+        s
     }
 }
 
@@ -151,7 +191,7 @@ pub fn valid_token(token: &str) -> bool {
 
 /// 去掉 Windows `canonicalize()` 加上的 `\\?\` 前缀：这个写法要给程序看，
 /// 直接印到手机上没人读得懂，而且它会改变路径比较的结果。
-fn strip_verbatim(p: &Path) -> PathBuf {
+pub fn clean_abs(p: &Path) -> PathBuf {
     let s = p.to_string_lossy().to_string();
     #[cfg(windows)]
     if let Some(rest) = s.strip_prefix(r"\\?\") {
@@ -195,7 +235,7 @@ pub fn validate_upload_dir(raw: &Path) -> Result<String> {
     if !raw.is_dir() {
         bail!("那是一个文件，不是目录: {}", raw.display());
     }
-    let abs = strip_verbatim(&raw.canonicalize().unwrap_or_else(|_| {
+    let abs = clean_abs(&raw.canonicalize().unwrap_or_else(|_| {
         if raw.is_absolute() {
             raw.to_path_buf()
         } else {
@@ -329,6 +369,7 @@ pub fn init_root(root: &Path) -> Result<Config> {
         cloudflared: "tools/cloudflared.exe".into(),
         bind: default_bind(),
         upload_dirs: Vec::new(),
+        upload_max_mb: default_upload_max_mb(),
     };
     write_atomic(&cfg_path, serde_json::to_string_pretty(&cfg)?.as_bytes())?;
     Ok(cfg)
@@ -336,7 +377,10 @@ pub fn init_root(root: &Path) -> Result<Config> {
 
 fn load_config_raw(cfg_path: &std::path::Path) -> Result<Config> {
     let text = std::fs::read_to_string(cfg_path).context("读取 config.json 失败")?;
-    let cfg: Config = serde_json::from_str(&text).context("config.json 格式错误")?;
+    let mut cfg: Config = serde_json::from_str(&text).context("config.json 格式错误")?;
+    // 上限是手改过也认的范围：校验只写在 CLI 那一侧的话，直接编辑 config.json
+    // 就能把「一个文件最多占多少磁盘」变成任意数
+    cfg.upload_max_mb = cfg.upload_max_mb.clamp(1, UPLOAD_MAX_LIMIT_MB);
     Ok(cfg)
 }
 
@@ -512,9 +556,66 @@ fn write_zip(out: &Path, dir: &Path, files: &[FileEntry]) -> Result<()> {
     Ok(())
 }
 
+/// 我们自己的中间文件名形如 `.报告.pdf.<32位hex>.part`
+fn is_our_part(name: &str) -> bool {
+    let Some(mid) = name.strip_prefix('.').and_then(|n| n.strip_suffix(".part")) else {
+        return false;
+    };
+    match mid.rsplit_once('.') {
+        Some((_, id)) => id.len() == 32 && id.chars().all(|c| c.is_ascii_hexdigit()),
+        None => false,
+    }
+}
+
+/// 上传中断（进程被杀、隧道掉线）会在用户选的目录里留下 `.part`。那些地方不在 `data/`
+/// 下，例行清理原本扫不到，所以按白名单扫一遍，只认上面那个形状、且超过一天的。
+fn sweep_upload_parts(dirs: &[String]) {
+    for d in dirs {
+        let base = Path::new(d);
+        let Ok(top) = std::fs::read_dir(base) else {
+            continue;
+        };
+        for e in top.flatten() {
+            let path = e.path();
+            if path.is_dir() {
+                let Ok(sub) = std::fs::read_dir(&path) else {
+                    continue;
+                };
+                for s in sub.flatten() {
+                    let sp = s.path();
+                    let name = s.file_name().to_string_lossy().to_string();
+                    if is_our_part(&name) && stale(&sp) {
+                        let _ = std::fs::remove_file(sp);
+                    }
+                }
+                continue;
+            }
+            let name = e.file_name().to_string_lossy().to_string();
+            if is_our_part(&name) && stale(&path) {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+}
+
+/// 最后修改时间超过一天，就算不上「正在进行中」了
+fn stale(path: &Path) -> bool {
+    path.metadata()
+        .and_then(|m| m.modified())
+        .map(|t| {
+            t.elapsed()
+                .map(|d| d.as_millis() as i64 > TMP_MAX_AGE_MS)
+                .unwrap_or(false)
+        })
+        .unwrap_or(false)
+}
+
 /// 过期 bundle 自动清理，顺带扫掉 tmp/ 里的残留（预览图片、publish_text 落盘文件）
 pub fn cleanup_expired(root: &Path) {
     let now = now_ms();
+    if let Ok(cfg) = load_config(root) {
+        sweep_upload_parts(&cfg.upload_dirs);
+    }
     let mut dead = Vec::new();
     if let Ok(rd) = std::fs::read_dir(bundles_dir(root)) {
         for e in rd.flatten() {
@@ -745,6 +846,100 @@ mod tests {
         // 只记元数据：data/ 下面不该多出文件副本
         assert!(!root.join("inbox").join("uploads").exists());
         assert!(uploads_file(&root).is_file());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// Windows 认这些名字为设备，不管扩展名：传个叫 CON.pdf 的东西进来，
+    /// 创建会失败或者写到别处去。
+    #[test]
+    fn sanitize_blocks_windows_device_names() {
+        assert_eq!(sanitize_name("CON"), "_CON");
+        assert_eq!(sanitize_name("nul.txt"), "_nul.txt");
+        assert_eq!(sanitize_name("aux.cs"), "_aux.cs");
+        assert_eq!(sanitize_name("COM1.log"), "_COM1.log");
+        assert_eq!(sanitize_name("LPT9"), "_LPT9");
+        // 但普通名字不能被误伤
+        assert_eq!(sanitize_name("CONtrast.pdf"), "CONtrast.pdf");
+        assert_eq!(sanitize_name("combo.mp4"), "combo.mp4");
+        assert_eq!(sanitize_name("AUX-2026.md"), "AUX-2026.md");
+        assert_eq!(sanitize_name("COM0.txt"), "COM0.txt");
+    }
+
+    #[test]
+    fn sanitize_kills_short_names_and_trailing_junk() {
+        // 8.3 短名会解析到别的文件上，「绝不覆盖」就假了
+        assert_eq!(sanitize_name("SECRE~1.TXT"), "SECRE_1.TXT");
+        // Windows 会自己抹掉尾部的点和空格，留着的话记录里的名字和磁盘上的不一致
+        assert_eq!(sanitize_name("a. "), "a");
+        assert_eq!(sanitize_name("报告  "), "报告");
+    }
+
+    #[test]
+    fn stale_upload_parts_are_swept() {
+        use std::time::{Duration, SystemTime};
+        let root = tmp_root("parts");
+        init_root(&root).unwrap();
+        let dir = std::env::temp_dir().join(format!("postbox-parts-{}", now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        update_config(&root, |c| {
+            c.upload_dirs = vec![dir.display().to_string()];
+            Ok(())
+        })
+        .unwrap();
+
+        let mk = |name: &str, old: bool| {
+            let p = dir.join(name);
+            std::fs::write(&p, b"x").unwrap();
+            if old {
+                let f = std::fs::OpenOptions::new().write(true).open(&p).unwrap();
+                f.set_modified(SystemTime::now() - Duration::from_secs(3 * 86400))
+                    .unwrap();
+            }
+        };
+        // 三天前中断的中间文件：该扫掉
+        mk(".报告.pdf.0123456789abcdef0123456789abcdef.part", true);
+        // 正在进行的（刚写的）：不能碰
+        mk(".进行中.pdf.fedcba9876543210fedcba9876543210.part", false);
+        // 形状不像我们的：别人的文件，永远不碰
+        mk(".notes.part", true);
+        mk("报告.pdf", true);
+
+        cleanup_expired(&root);
+        assert!(!dir
+            .join(".报告.pdf.0123456789abcdef0123456789abcdef.part")
+            .exists());
+        assert!(dir
+            .join(".进行中.pdf.fedcba9876543210fedcba9876543210.part")
+            .exists());
+        assert!(dir.join(".notes.part").exists());
+        assert!(dir.join("报告.pdf").exists());
+        std::fs::remove_dir_all(dir).ok();
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn hand_edited_upload_cap_is_clamped_on_load() {
+        let root = tmp_root("capclamp");
+        init_root(&root).unwrap();
+        let path = root.join("config.json");
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(
+            &path,
+            text.replace("\"upload_max_mb\": 100", "\"upload_max_mb\": 999999"),
+        )
+        .unwrap();
+        assert_eq!(
+            load_config(&root).unwrap().upload_max_mb,
+            UPLOAD_MAX_LIMIT_MB
+        );
+        std::fs::write(
+            &path,
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .replace("\"upload_max_mb\": 999999", "\"upload_max_mb\": 0"),
+        )
+        .unwrap();
+        assert_eq!(load_config(&root).unwrap().upload_max_mb, 1);
         std::fs::remove_dir_all(root).ok();
     }
 

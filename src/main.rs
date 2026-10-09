@@ -36,6 +36,7 @@ fn cfg_display(cfg: &store::Config, key: &str) -> String {
                 cfg.upload_dirs.join(", ")
             }
         }
+        "upload_max_mb" => format!("{} MB", cfg.upload_max_mb),
         _ => String::new(),
     }
 }
@@ -178,6 +179,28 @@ fn apply_config_field(
             cfg.ntfy_topic = v;
         }
         "cloudflared" => cfg.cloudflared = value.to_string(),
+        "upload_max_mb" => {
+            let n: u32 = value
+                .trim()
+                .parse()
+                .context("上传上限要是 MB 数，比如 100")?;
+            if n == 0 {
+                bail!("上传上限不能是 0，那样一个文件都传不进来");
+            }
+            if n > store::UPLOAD_MAX_LIMIT_MB {
+                bail!(
+                    "最大支持 {} MB；再大的文件建议从电脑往手机发",
+                    store::UPLOAD_MAX_LIMIT_MB
+                );
+            }
+            if n > store::UPLOAD_MAX_DEFAULT_MB {
+                println!(
+                    "提示: 超过 {} MB 的部分走 Cloudflare 免费隧道过不去（那边卡 100 MB），                     只有内网直连或 Tailscale 才用得上。",
+                    store::UPLOAD_MAX_DEFAULT_MB
+                );
+            }
+            cfg.upload_max_mb = n;
+        }
         "base_url" => {
             let v = value.trim().to_string();
             if v != "none" && !v.starts_with("http://") && !v.starts_with("https://") {
@@ -315,6 +338,7 @@ async fn main() -> Result<()> {
                     "base_url" => cfg.base_url.clone().unwrap_or_else(|| "(none)".into()),
                     "access_key" => cfg.access_key.clone(),
                     "upload_dirs" => cfg.upload_dirs.join(", "),
+                    "upload_max_mb" => cfg.upload_max_mb.to_string(),
                     _ => bail!("未知配置项: {key}"),
                 };
                 println!("{v}");
@@ -592,6 +616,7 @@ mod config_tests {
             cloudflared: "tools/cloudflared.exe".into(),
             bind: "0.0.0.0".into(),
             upload_dirs: vec![],
+            upload_max_mb: 100,
         }
     }
 

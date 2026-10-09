@@ -60,7 +60,7 @@ data/autostart.vbs         只有注册了 Windows 登录自启才会有
 | `up` 退出 | 页面打不开；MCP 照样往 `data/` 里发布 | 再跑一次 `postbox up`，或等登录自启 |
 | 改 `port` / `bind` / `tunnel` | 正在跑的服务仍用旧值 | 重启 `postbox up` |
 | 改 `access_key` / `ntfy_topic` | 不用重启，服务会重新读配置文件 | 换了主题手机要重新订阅 |
-| `upload add` / `upload rm` 一个目录 | 不用重启就生效；目录清空后首页连入口都不显示 | 无 |
+| `upload add` / `upload rm` 一个目录，或改 `upload_max_mb` | 不用重启就生效；目录清空后首页连入口都不显示 | 无 |
 | `data/config.json` 丢了 | 除 `init` 外的命令都会拒绝运行，重建后是全新的密钥和主题 | 手机重新订阅；旧文件包链接仍然能打开（token 存在 `bundles/` 里） |
 
 ## 四、停止与卸载
@@ -109,7 +109,7 @@ postbox autostart uninstall    :: 删计划任务或 HKCU\...\Run 项 + data/aut
 | Word 预览一片空白 | 老版 `.doc`（Word 97-2003）不支持；超过 20MB 的文档不做在线预览 | 下载原文件用 Office/WPS 打开 |
 | 手机上点「提交反馈」没反应 | 页面 CSP 少了 `connect-src 'self'`，`curl -sD -` 看一眼响应头 | 用当前 `master` 重新编译——0.2.0 就是缺了这行 |
 | 上传页里一个目录都没有 | `upload_dirs` 是空的 | `postbox upload add D:\某个目录` |
-| 上传刚好在 100 MB 失败 | Cloudflare 免费计划的请求体上限，隧道那层就拒了，到不了 postbox | 这种大文件还是从电脑往手机发，或者换命名隧道 / 内网，上限自己定 |
+| 上传跑到 150–170 秒被 502/524 掐断 | 那是隧道的请求时限，不是 `upload_max_mb`：实测 1.5 MB/s 下 200 MB 能过、300 MB 过不去 | 想要大的就同一 Wi-Fi / Tailscale 直连电脑（那时只有应用自己的上限），或者从电脑往手机发 |
 | 上传说目录不存在 | 电脑上那个目录被改名或删了 | `postbox upload list` 会标出来，重新 add 或收回 |
 | Word 文字有了但图片没有 | 图片解在 `data/tmp/m-<token>-<idx>/`，文件包过期时会被一起删掉 | 重新发布一次 |
 | `cargo build` 报「拒绝访问（os error 5）」 | exe 正在被服务或某个 MCP 进程占用 | 先结束对应进程，或换 `--target-dir` |

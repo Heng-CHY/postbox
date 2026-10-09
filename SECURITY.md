@@ -55,8 +55,10 @@ threat model. Reading it before filing an issue saves everyone time.
   entries picked by index (the phone never sends a path), the subfolder and file names pass
   through `sanitize_name` so `/`, `\`, `..` and `:` cannot escape the folder, an existing file
   is never overwritten (`名字 (1).ext` instead), the body streams to a `.part` under a hard
-  100 MB cap and is renamed only when the byte count matches. Revoke the folders with
-  `postbox upload rm` when you are done; `upload list` shows what is currently open.
+  configurable cap (`upload_max_mb`, default 100 MB, max 2048) and is renamed only when the
+  byte count matches.
+  Revoke the folders with `postbox upload rm` when you are done; `upload list` shows what is
+  currently open. Raising the cap raises how much disk a key-holder can consume.
 * **Preview pages run your document's content.** Markdown is rendered with raw HTML
   disabled and `javascript:` / `vbscript:` / `data:text/html` links neutralised,
   `.docx` is parsed into a controlled subset, and every response carries a

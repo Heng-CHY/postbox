@@ -19,8 +19,11 @@ All notable changes to this project are documented here. The format follows
   - The phone picks a folder by index and never sends a path; subfolder and file names go
     through `sanitize_name`, and the result is asserted to stay under the chosen entry.
   - An existing file is never overwritten: `报告.pdf` becomes `报告 (1).pdf`.
-  - 100 MB per file, which is also Cloudflare's free-plan request-body cap; the page says so
-    before the transfer instead of dying at 90%.
+  - `upload_max_mb` sets the app's own per-file cap (default 100, ceiling 2048) and is read
+    live, so no restart. The free tunnel has its own opinion: measured at ~1.5 MB/s, 200 MB
+    got through three times and 300 MB was refused by Cloudflare at ~170 s (524) — the wall
+    over the tunnel is request duration, not bytes. Same build over the LAN: 300 MB in 4.8 s.
+    The page states the limit before the transfer instead of dying at 90%.
   - Uploads require `access_key`, and metadata (time, folder, name, size, client IP) is
     appended to `data/inbox/uploads.jsonl`. No copy is kept in `data/` — the file lands where
     you pointed it and nowhere else.

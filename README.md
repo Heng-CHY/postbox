@@ -128,6 +128,7 @@ Everything lives in `data/config.json`. Read or set a value with
 | `ntfy_topic` | random UUID | the topic your phone subscribes to; empty disables pushes |
 | `cloudflared` | `tools/cloudflared.exe` | path to the tunnel binary, relative to the working dir or absolute |
 | `upload_dirs` | *(empty)* | folders the phone may upload into; managed with `postbox upload`, not by hand |
+| `upload_max_mb` | `100` | per-file upload cap. Raising it only pays off off-tunnel: Cloudflare's free plan refuses request bodies over 100 MB whatever the app says |
 
 * `base_url none` clears a stale hostname; `tunnel false` is for a LAN-only setup (then use
   `http://<pc-ip>:8712/?key=…` from your phone).
@@ -223,10 +224,12 @@ What is by design, what to report privately, and how to harden further:
   hands you the download. Single-process serving plus a bandwidth-limited free tunnel: fine
   for documents, slow for a 2 GB video.
 * No HTTPS on the local port — TLS terminates at the tunnel.
-* Uploads stop at 100 MB per file: that is Cloudflare's free-plan request-body limit, so the
-  tunnel refuses a bigger one before the bytes reach `postbox`. Send large things the other
-  way (publish from the PC) or put the server on a LAN / your own tunnel where the cap is
-  yours to set.
+* Over the free tunnel the wall is **time, not size**. Cloudflare gives up on a request after
+  roughly 150–170 seconds (HTTP 524), and a quick tunnel moves about 1.5 MB/s from this
+  machine, so measured: 60 MB 3/3 through, 200 MB 3/3 through, 300 MB 0/2 — both died at ~170
+  s. `upload_max_mb` (default 100, max 2048) is the app's own cap; raise it and the tunnel
+  still decides. Off Cloudflare the same build took 200 MB in 4.0 s and 300 MB in 4.8 s, so
+  same-Wi-Fi (`http://<pc-ip>:8712/upload`) or Tailscale is where big files actually belong.
 * Free quick tunnels change hostname on every restart, so old links die. Need a stable URL?
   Put the server behind your own domain, a named Cloudflare tunnel or Tailscale and set
   `base_url` yourself — the code does not care where the hostname comes from.
