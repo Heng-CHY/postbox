@@ -105,8 +105,8 @@ place the README points at for prebuilt binaries.
 
 ```bash
 # 1. bump `version` in Cargo.toml and move CHANGELOG's Unreleased under [x.y.z], commit
-git tag -a v0.2.0 -m "v0.2.0"
-git push origin master v0.2.0        # pushing the tag is what publishes the release
+git tag -a v0.3.0 -m "v0.3.0"
+git push origin master v0.3.0        # pushing the tag is what publishes the release
 ```
 
 Keep `postbox --version` and the tag in step, otherwise a bug report naming a version

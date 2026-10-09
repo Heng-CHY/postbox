@@ -87,6 +87,8 @@ threat model. Reading it before filing an issue saves everyone time.
 
 | Version | Supported |
 | ------- | --------- |
+| 0.3.x   | yes       |
+| 0.2.x   | yes       |
 | 0.1.x   | yes       |
 | `< 0.1` | no — pre-release builds, including the `remote-hub` name this project shipped under before 0.1, are not supported |
 

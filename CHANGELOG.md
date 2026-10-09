@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-10-09
+
+Two directions instead of one: a phone can now push files back into folders the PC opens,
+and video served to a phone actually plays and seeks. A minor bump because `config.json`
+grew two keys and every page's CSP changed; nothing that was published before needs
+re-publishing.
+
 ### Added
 
 - The other direction: **the phone can send files to the computer.** `postbox upload add
