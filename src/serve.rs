@@ -914,23 +914,29 @@ fn internal_error() -> Response {
         .into_response()
 }
 
-/// `.mp4` / `.mov` 的 sample entry fourcc 直接写着这条片子是什么编码。
-/// 只翻文件头和文件尾各 1 MB，命中 `hvc1` / `hev1` 就按 HEVC 处理 —— 这是启发式，
-/// 为此引一个 mp4 解析库不值得；判错的代价是一句提示多余或者缺失。
-fn hevc_in_iso_bmff(path: &std::path::Path) -> bool {
+/// `.mp4` / `.mov` 的 sample entry fourcc 直接写着这条片子用什么编码。
+/// 只翻文件头和文件尾各 1 MB（`moov` 可能在任一端），返回 `(是 HEVC, 找到了音轨)`。
+/// 这是启发式：判错的代价是一句提示多余或者缺失，不值得为它引一个 mp4 解析库。
+/// 反过来说「没找到音轨」时也别当铁证 —— 索引大过两个窗口时就扫不到了。
+fn iso_bmff_probe(path: &std::path::Path) -> (bool, bool) {
     use std::io::{Read, Seek, SeekFrom};
     const WIN: u64 = 1024 * 1024;
+    const VIDEO_HEVC: [&[u8]; 2] = [b"hvc1", b"hev1"];
+    const VIDEO_AVC: [&[u8]; 1] = [b"avc1"];
+    const AUDIO: [&[u8]; 5] = [b"mp4a", b"ac-3", b"ec-3", b"alac", b"opus"];
+    let has_tag = |buf: &[u8], tags: &[&[u8]]| buf.windows(4).any(|w| tags.contains(&w));
     let Ok(len) = std::fs::metadata(path).map(|m| m.len()) else {
-        return false;
+        return (false, false);
     };
     if len < 16 {
-        return false;
+        return (false, false);
     }
     let mut offsets = vec![0u64, len.saturating_sub(WIN)];
     offsets.dedup();
+    let (mut hevc, mut audio) = (false, false);
     for start in offsets {
         let Ok(mut f) = std::fs::File::open(path) else {
-            return false;
+            return (hevc, audio);
         };
         if f.seek(SeekFrom::Start(start)).is_err() {
             continue;
@@ -939,15 +945,14 @@ fn hevc_in_iso_bmff(path: &std::path::Path) -> bool {
         if f.take(WIN).read_to_end(&mut buf).is_err() {
             continue;
         }
-        if buf.windows(4).any(|w| w == b"hvc1" || w == b"hev1") {
-            return true;
-        }
+        hevc |= has_tag(&buf, &VIDEO_HEVC);
+        audio |= has_tag(&buf, &AUDIO);
         // 头部已经看到 avc1 就是 H.264，不必再翻尾部
-        if start == 0 && buf.windows(4).any(|w| w == b"avc1") {
-            return false;
+        if start == 0 && has_tag(&buf, &VIDEO_AVC) {
+            return (hevc, audio);
         }
     }
-    false
+    (hevc, audio)
 }
 
 /// 音视频页内播放。`raw_url` 走的是支持 `Range` 的 `/raw/`，播放器才能拖进度条、
@@ -979,16 +984,39 @@ fn media_html(
         "controls preload=\"metadata\" style=\"width:100%\""
     };
     let player = format!("<{tag} src=\"{raw_url}\" {attrs}></{tag}>");
+    let iso = matches!(ext.as_str(), "mp4" | "m4v" | "mov");
+    let (hevc, found_audio) = if iso {
+        iso_bmff_probe(path)
+    } else {
+        (false, false)
+    };
     let mut hint = "<p class=muted>拖到新位置会等一下，免费隧道的带宽就这么多。\
 一直转圈的话点右上「下载原文件」，存到手机上看更快。</p>"
         .to_string();
-    if matches!(ext.as_str(), "mp4" | "m4v" | "mov") && hevc_in_iso_bmff(path) {
+    if hevc {
         hint.push_str(
             "<p class=muted>这条是 HEVC（H.265）编码，iPhone 拍的视频默认就是它。\
 Android 上的 Chrome 和 Edge 一般有硬件解码、能放；Firefox 和多数电脑浏览器没有对应解码器，\
 那边就只能下载后看。</p>",
         );
     }
+    // 「没声音」有两种完全不同的原因，分开说才不用让人瞎猜
+    hint.push_str(match tag {
+        "video" if iso && !found_audio => {
+            "<p class=muted>这条视频里没找到音轨，所以本来就该是静音的（录屏和素材常见）。\
+要是它确实该有声音，那就是索引太大没扫到，下载后用系统播放器最准。</p>"
+        }
+        "video" => {
+            "<p class=muted>画面在动但没有声音：多半是这个浏览器没有 AAC 解码器，\
+Android 上的 Firefox 就是这样。换 Edge 或 Chrome 打开同一条链接，或者点右上「下载原文件」\
+用系统播放器。</p>"
+        }
+        _ => {
+            "<p class=muted>一点声音都没有：多半是这个浏览器没有对应的解码器，\
+Android 上的 Firefox 对 AAC 和 MP3 常常没辙。换 Edge 或 Chrome 打开同一条链接，\
+或者点右上「下载原文件」用系统播放器。</p>"
+        }
+    });
     format!("{head}{player}{hint}")
 }
 
@@ -1790,7 +1818,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("postbox-vid-{}", store::now_ms()));
         std::fs::create_dir_all(&dir).unwrap();
         let clip = dir.join("clip.mp4");
-        std::fs::write(&clip, b"ftypisomavc1\x00paddingpadding").unwrap();
+        std::fs::write(&clip, b"ftypisomavc1mp4a\x00paddingpadding").unwrap();
         let meta =
             store::publish(&st.root, std::slice::from_ref(&clip), None, "".into(), 1).unwrap();
 
@@ -1803,6 +1831,9 @@ mod tests {
         assert!(!body.contains("要本机播放器"), "{body}");
         // H.264 的片子不该被说成 HEVC
         assert!(!body.contains("HEVC"), "{body}");
+        // 有音轨的片子：该说的是「这个浏览器缺 AAC 解码器」，而不是「这条没有音轨」
+        assert!(body.contains("AAC 解码器"), "{body}");
+        assert!(!body.contains("没找到音轨"), "{body}");
 
         // mkv 走另一条路：不给播放器，给说明和下载
         let mkv = dir.join("movie.mkv");
@@ -1834,6 +1865,59 @@ mod tests {
         let (_, body) = preview_html(&st, &meta.token, 0).unwrap();
         assert!(body.contains("<video"), "{body}");
         assert!(body.contains("HEVC"), "{body}");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&st.root).ok();
+    }
+
+    #[test]
+    fn iso_probe_reads_codecs_from_both_ends() {
+        let dir = std::env::temp_dir().join(format!("postbox-probe-{}", store::now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // 头部就写着 avc1 + mp4a
+        let head = dir.join("head.mp4");
+        std::fs::write(&head, b"ftypisomavc1mp4a").unwrap();
+        assert_eq!(iso_bmff_probe(&head), (false, true));
+        // moov 在尾部：hvc1 + mp4a 落在头部窗口之外
+        let tail = dir.join("tail.mp4");
+        let mut bytes = vec![0u8; 3 * 1024 * 1024];
+        bytes.extend_from_slice(b"moovtrakmdia hvc1mp4a");
+        std::fs::write(&tail, &bytes).unwrap();
+        assert_eq!(iso_bmff_probe(&tail), (true, true));
+        // 只有画面的一条（录屏、无声素材）
+        let silent = dir.join("silent.mp4");
+        std::fs::write(&silent, b"ftypisomavc1\x00\x00\x00\x00").unwrap();
+        assert_eq!(iso_bmff_probe(&silent), (false, false));
+        // 太小或读不到都不该 panic
+        let tiny = dir.join("tiny.mp4");
+        std::fs::write(&tiny, b"ft").unwrap();
+        assert_eq!(iso_bmff_probe(&tiny), (false, false));
+        assert_eq!(iso_bmff_probe(&dir.join("missing.mp4")), (false, false));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 「没声音」有两种完全不同的原因，页面上必须分开讲：这条本来就没音轨，
+    /// 还是这个浏览器解不了 AAC（Android 上的 Firefox 就是这个情况）。
+    #[test]
+    fn silent_clips_and_missing_codecs_say_different_things() {
+        let st = state("sound");
+        let dir = std::env::temp_dir().join(format!("postbox-sound-{}", store::now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let silent = dir.join("screencap.mp4");
+        std::fs::write(&silent, b"ftypisomavc1\x00\x00\x00\x00").unwrap();
+        let m1 =
+            store::publish(&st.root, std::slice::from_ref(&silent), None, "".into(), 1).unwrap();
+        let (_, body) = preview_html(&st, &m1.token, 0).unwrap();
+        assert!(body.contains("没找到音轨"), "{body}");
+        assert!(!body.contains("AAC 解码器"), "{body}");
+
+        let song = dir.join("歌.mp3");
+        std::fs::write(&song, b"ID3\x03\x00fake mp3 frames").unwrap();
+        let m2 = store::publish(&st.root, std::slice::from_ref(&song), None, "".into(), 1).unwrap();
+        let (_, body) = preview_html(&st, &m2.token, 0).unwrap();
+        assert!(body.contains("<audio"), "{body}");
+        assert!(body.contains("一点声音都没有"), "{body}");
+
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&st.root).ok();
     }

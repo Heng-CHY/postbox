@@ -25,6 +25,11 @@ All notable changes to this project are documented here. The format follows
   sample entry reads `hvc1`/`hev1` is called out as HEVC — the iPhone default, which Firefox
   and most desktop browsers cannot decode. The probe reads the first and last 1 MB of the
   file, so a `moov`-at-end clip is still identified.
+- "It moves but there is no sound" is answered on the page rather than guessed at: the same
+  probe looks for an audio sample entry (`mp4a`, `ac-3`, `ec-3`, `alac`, `opus`), so a clip
+  with no audio track says so, while a clip that does have one says the browser is missing an
+  AAC decoder — Firefox on Android decodes H.264 video but has no AAC, which is the case most
+  likely to be hit. Audio-only pages carry the same sentence for their codecs.
 - `playsinline` and `preload="metadata"` on the video element: iOS no longer hijacks a tap
   into fullscreen, and opening the page costs a few hundred kilobytes instead of the clip.
 
@@ -34,7 +39,7 @@ All notable changes to this project are documented here. The format follows
   a `.ts` source file is the more common thing an agent publishes here.
 - `/m/` (the images pulled out of a `.docx`) now goes through the same sender as the other
   file routes instead of carrying its own copy.
-- The test suite grows from 46 to 53 tests: range planning, container classification, the
+- The test suite grows from 46 to 55 tests: range planning, container classification, the
   media `Content-Type` overrides, and two page-level tests that publish a clip and read back
   the rendered player.
 

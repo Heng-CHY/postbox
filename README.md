@@ -202,10 +202,12 @@ What is by design, what to report privately, and how to harden further:
   bundle, and so on). Past a cap you get a download button and an honest message, not a
   truncated page.
 * What a browser can decode is still the browser's decision. `.mp4`/`.mov` recorded as HEVC
-  (the iPhone default) plays on Android Chrome and stalls on Firefox; `.mkv`, `.avi`, `.wmv`
-  and friends are not offered a player at all — the page says so and hands you the download.
-  Single-process serving plus a bandwidth-limited free tunnel: fine for documents, slow for a
-  2 GB video.
+  (the iPhone default) plays on Android Chrome and stalls on Firefox; sound needs an AAC
+  decoder as well, and Firefox on Android decodes the H.264 picture of a clip while staying
+  silent — the page names which of the two is missing rather than leaving you to guess.
+  `.mkv`, `.avi`, `.wmv` and friends are not offered a player at all; the page says so and
+  hands you the download. Single-process serving plus a bandwidth-limited free tunnel: fine
+  for documents, slow for a 2 GB video.
 * No HTTPS on the local port — TLS terminates at the tunnel.
 * Free quick tunnels change hostname on every restart, so old links die. Need a stable URL?
   Put the server behind your own domain, a named Cloudflare tunnel or Tailscale and set
@@ -213,7 +215,7 @@ What is by design, what to report privately, and how to harden further:
 * The web UI **and the CLI output** are Chinese; flags, config keys, comments and docs are
   bilingual. A locale layer is a good first contribution — see
   [`CONTRIBUTING.md`](CONTRIBUTING.md).
-* 53 unit tests and CI on three OSes, but no browser automation: what a page looks like on a
+* 55 unit tests and CI on three OSes, but no browser automation: what a page looks like on a
   real phone is still checked by hand, which is why the operations doc carries an acceptance
   checklist.
 
