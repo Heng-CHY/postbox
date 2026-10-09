@@ -195,8 +195,8 @@ fn apply_config_field(
             }
             if n > store::UPLOAD_MAX_DEFAULT_MB {
                 println!(
-                    "提示: 超过 {} MB 的部分走 Cloudflare 免费隧道过不去（那边卡 100 MB），                     只有内网直连或 Tailscale 才用得上。",
-                    store::UPLOAD_MAX_DEFAULT_MB
+                    "提示: 免费隧道大约 150 秒就会掐断一个请求（这台机器实测约 1.5 MB/s）。\
+                     超过 48 MB 的上传会自动切片，所以调大确实有用；嫌慢就连同一个 Wi-Fi 直传。"
                 );
             }
             cfg.upload_max_mb = n;
