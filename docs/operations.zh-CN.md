@@ -43,6 +43,7 @@ data/autostart.vbs         只有注册了 Windows 登录自启才会有
 - [ ] 同一个文件名传两次得到 `名字 (1).ext`，电脑上原有那份没被顶掉
 - [ ] `postbox upload add C:nything` 被拒绝并说清楚为什么；一个还不存在的目录同样被拒绝
 - [ ] 不带访问密钥时上传页回 401，`POST /api/upload` 也回 401
+- [ ] 超过 48 MB 的文件会分成几片到达并逐字节拼回原样；掐断其中一片后，是按电脑报回的 `received` 位置续传，不是从头再传
 - [ ] 手机上点「提交反馈」真的能提交（页面 CSP 里要有 `connect-src 'self'`，缺了这行按钮点了没反应）
 - [ ] 电脑重启后约 30 秒内，手机收到一条「postbox 新地址」推送，新域名可打开；**重启前生成的链接按设计全部失效**
 - [ ] 过期（默认 30 天）的文件包自动消失，页面变成「链接不存在或已过期」
@@ -61,6 +62,7 @@ data/autostart.vbs         只有注册了 Windows 登录自启才会有
 | 改 `port` / `bind` / `tunnel` | 正在跑的服务仍用旧值 | 重启 `postbox up` |
 | 改 `access_key` / `ntfy_topic` | 不用重启，服务会重新读配置文件 | 换了主题手机要重新订阅 |
 | `upload add` / `upload rm` 一个目录，或改 `upload_max_mb` | 不用重启就生效；目录清空后首页连入口都不显示 | 无 |
+| 上传中途断了 | 半成品在 `data/tmp/up-<id>.part`，超过一天由例行清理收掉 | 重传那个文件即可，新会话从零开始 |
 | `data/config.json` 丢了 | 除 `init` 外的命令都会拒绝运行，重建后是全新的密钥和主题 | 手机重新订阅；旧文件包链接仍然能打开（token 存在 `bundles/` 里） |
 
 ## 四、停止与卸载
@@ -109,7 +111,7 @@ postbox autostart uninstall    :: 删计划任务或 HKCU\...\Run 项 + data/aut
 | Word 预览一片空白 | 老版 `.doc`（Word 97-2003）不支持；超过 20MB 的文档不做在线预览 | 下载原文件用 Office/WPS 打开 |
 | 手机上点「提交反馈」没反应 | 页面 CSP 少了 `connect-src 'self'`，`curl -sD -` 看一眼响应头 | 用当前 `master` 重新编译——0.2.0 就是缺了这行 |
 | 上传页里一个目录都没有 | `upload_dirs` 是空的 | `postbox upload add D:\某个目录` |
-| 上传跑到 150–170 秒被 502/524 掐断 | 那是隧道的请求时限，不是 `upload_max_mb`：实测 1.5 MB/s 下 200 MB 能过、300 MB 过不去 | 想要大的就同一 Wi-Fi / Tailscale 直连电脑（那时只有应用自己的上限），或者从电脑往手机发 |
+| 上传跑到 150–170 秒被 502/524 掐断 | 那是隧道的请求时限，不是 `upload_max_mb`；超过 48 MB 本来就该走切片，整文件失败说明没用到切片那条路 | 核对 `postbox --version` 是否当前代码；特别大的还是同一 Wi-Fi / Tailscale |
 | 上传说目录不存在 | 电脑上那个目录被改名或删了 | `postbox upload list` 会标出来，重新 add 或收回 |
 | Word 文字有了但图片没有 | 图片解在 `data/tmp/m-<token>-<idx>/`，文件包过期时会被一起删掉 | 重新发布一次 |
 | `cargo build` 报「拒绝访问（os error 5）」 | exe 正在被服务或某个 MCP 进程占用 | 先结束对应进程，或换 `--target-dir` |

@@ -43,9 +43,13 @@ being downloaded whole. Nothing is buffered into memory on the way out.
 
 Uploads go the other way and are equally streamed: `POST /api/upload` takes the file as the
 request body, writes a `.part` beside the target and renames it only once the byte count
-checks out. The phone never sends a path — it picks one of `upload_dirs` by number, and both
-the subfolder name and the filename go through `sanitize_name`, so the worst a hostile client
-can do is ask for a folder that does not exist.
+checks out. Files over 48 MB use `POST /api/upload/chunk` instead — a session id, pieces
+appended in order into `data/tmp/up-<id>.part`, and the PC answering with how many bytes it
+actually holds, so the phone re-sends one piece rather than the whole file. The tunnel's
+~150-second request timeout is the reason the split exists at all. The phone never sends a
+path — it picks one of `upload_dirs` by number, and both the subfolder name and the filename
+go through `sanitize_name`, so the worst a hostile client can do is ask for a folder that does
+not exist.
 
 ## Where the code lives
 

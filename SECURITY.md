@@ -56,7 +56,10 @@ threat model. Reading it before filing an issue saves everyone time.
   through `sanitize_name` so `/`, `\`, `..` and `:` cannot escape the folder, an existing file
   is never overwritten (`名字 (1).ext` instead), the body streams to a `.part` under a hard
   configurable cap (`upload_max_mb`, default 100 MB, max 2048) and is renamed only when the
-  byte count matches.
+  byte count matches. Chunked sessions keep their state in `data/tmp/up-<id>.part` under a
+  32-hex id the client cannot steer, and the destination is re-resolved against the whitelist
+  when the last piece lands — revoke a folder mid-upload and the file is refused rather than
+  written anyway.
   Revoke the folders with `postbox upload rm` when you are done; `upload list` shows what is
   currently open. Raising the cap raises how much disk a key-holder can consume.
 * **Preview pages run your document's content.** Markdown is rendered with raw HTML

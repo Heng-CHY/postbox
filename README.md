@@ -61,7 +61,7 @@ folder and the phone can send files the other way too.
 | **Preview** | Markdown, images, PDF, audio, video, code, diffs, `.docx`, `.xlsx/.xls/.ods`, `.csv/.tsv` as tables, indented `.json`, a file listing for `.zip`/`.tar.gz`, and `.html` reports rendered in a script-free sandbox. Media is served with HTTP `Range`, so video starts without the whole file arriving first and the seek bar works |
 | **Download / forward** | correct UTF-8 filenames; the link works for anyone, no account, no app |
 | **Feedback** | a note box on the page, appended to `data/inbox/feedback.jsonl` |
-| **Upload** | the other direction: open a folder with `postbox upload add D:\somewhere` and the phone can push files into it, into a subfolder you name on the spot |
+| **Upload** | the other direction: open a folder with `postbox upload add D:\somewhere` and the phone can push files into it, into a subfolder you name on the spot. Anything over 48 MB is sliced into chunks and resumed piece by piece |
 | **Expiry** | bundles self-delete (30 days by default, `--days 0` to keep forever) |
 | **Agent control** | an MCP stdio server with 5 tools; hardening covered in [SECURITY.md](SECURITY.md) |
 
@@ -227,9 +227,11 @@ What is by design, what to report privately, and how to harden further:
 * Over the free tunnel the wall is **time, not size**. Cloudflare gives up on a request after
   roughly 150–170 seconds (HTTP 524), and a quick tunnel moves about 1.5 MB/s from this
   machine, so measured: 60 MB 3/3 through, 200 MB 3/3 through, 300 MB 0/2 — both died at ~170
-  s. `upload_max_mb` (default 100, max 2048) is the app's own cap; raise it and the tunnel
-  still decides. Off Cloudflare the same build took 200 MB in 4.0 s and 300 MB in 4.8 s, so
-  same-Wi-Fi (`http://<pc-ip>:8712/upload`) or Tailscale is where big files actually belong.
+  s. That is why uploads over 48 MB are chunked: each piece is its own request, so the tunnel's
+  clock resets every time and a dropped piece is re-sent from where the PC actually got to.
+  `upload_max_mb` (default 100, max 2048) is the app's own cap. Off Cloudflare the same build
+  took 200 MB in 4.0 s and 300 MB in 4.8 s — same Wi-Fi (`http://<pc-ip>:8712/upload`) or
+  Tailscale is still the fast lane.
 * Free quick tunnels change hostname on every restart, so old links die. Need a stable URL?
   Put the server behind your own domain, a named Cloudflare tunnel or Tailscale and set
   `base_url` yourself — the code does not care where the hostname comes from.

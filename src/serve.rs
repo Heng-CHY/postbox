@@ -30,6 +30,23 @@ pub struct AppState {
     pub cfg: Config,
     /// 反馈限流：ip -> (窗口起点秒, 已提交条数)
     pub fb_hits: Mutex<HashMap<String, (i64, u32)>>,
+    /// 正在被写入的分块会话号。同一会话一次只收一片：手机超时重发而服务器还在写上一份时，
+    /// 两个请求会读到同一个 received，把同一段字节追加两次 —— 尺寸仍然对，内容是错的。
+    pub chunk_busy: Mutex<std::collections::HashSet<String>>,
+}
+
+/// 会话占用标记：离开作用域自动释放，错误分支也不会把会话永久锁住
+struct SessionGuard<'a> {
+    set: &'a Mutex<std::collections::HashSet<String>>,
+    id: String,
+}
+
+impl Drop for SessionGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut g) = self.set.lock() {
+            g.remove(&self.id);
+        }
+    }
 }
 
 impl AppState {
@@ -1578,6 +1595,30 @@ fn upload_target(
     let Some(dir) = cfg.upload_dirs.get(idx) else {
         return bad("那个目录已经不在白名单里了，刷新页面重选一个");
     };
+    resolve_dest(
+        cfg,
+        dir,
+        q.get("sub").map(|s| s.as_str()).unwrap_or(""),
+        q.get("n").map(|s| s.as_str()).unwrap_or(""),
+    )
+}
+
+/// 把「白名单里的一条 + 子目录名 + 文件名」变成一个确定的落点。
+/// 分块上传的后续请求只带会话号，落点是从会话文件里读出来的，所以这段单独拆出来：
+/// 两条路径共用同一套校验，包括目录被收回、被换成指向系统盘的链接这些情况。
+fn resolve_dest(
+    cfg: &Config,
+    dir: &str,
+    raw_sub: &str,
+    raw_name: &str,
+) -> Result<UploadDest, (StatusCode, String)> {
+    let bad = |m: &str| Err((StatusCode::BAD_REQUEST, m.to_string()));
+    if !cfg.upload_dirs.iter().any(|d| d == dir) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "那个目录已经从白名单里收回了，先在电脑上重新开放".to_string(),
+        ));
+    }
     let configured = std::path::PathBuf::from(dir);
     // canonicalize 会把 junction / 符号链接解开。白名单本身是电脑端写的（能改 config.json
     // 的人本来就能改密钥，属于本机可信范围），这里要防的是「登记之后有人把那个目录换成了
@@ -1597,13 +1638,13 @@ fn upload_target(
             "那个目录现在指向了系统盘（被换成了链接），先在电脑上重新 upload add 一次".to_string(),
         ));
     }
-    let raw_sub = q.get("sub").map(|s| s.trim()).unwrap_or("");
+    let raw_sub = raw_sub.trim();
     let sub = if raw_sub.is_empty() {
         String::new()
     } else {
         store::sanitize_name(raw_sub)
     };
-    let raw_name = q.get("n").map(|s| s.trim()).unwrap_or("");
+    let raw_name = raw_name.trim();
     if raw_name.is_empty() {
         return bad("文件名是空的");
     }
@@ -1617,7 +1658,7 @@ fn upload_target(
         return bad("目录名不合法");
     }
     Ok(UploadDest {
-        dir: dir.clone(),
+        dir: dir.to_string(),
         sub,
         target,
         name,
@@ -1679,7 +1720,7 @@ fn upload_form_html(cfg: &Config) -> String {
     format!(
         r#"<header class=top><a class=back href="/">← 全部文件</a><span class=badge>手机 → 电脑</span></header>
 <div class=card><h1>传到电脑上</h1>
-<p class=hint>选目录、选文件，然后点上传。单个文件 {cap} 以内。走公网隧道时真正的墙是时间：Cloudflare 大约 150 秒就会掐断一个请求，传两三分钟的大文件请连同一个 Wi-Fi 直接传（http://电脑内网IP:端口/upload）。</p>
+<p class=hint>选目录、选文件，然后点上传。单个文件 {cap} 以内。超过 48 MB 会自动切成片一段一段传，某一段断了只重传那一段 —— 免费隧道大约 150 秒就会掐断一个请求，切片就是为绕开它。还在同一个 Wi-Fi 上的话，直连电脑快得多。</p>
 <h3 class=sub>存到哪个目录</h3>{dirs}
 <h3 class=sub>再放进哪个小文件夹（可选）</h3>
 <input id=sub value="{today}" style="width:100%;padding:10px;border:1px solid var(--line);border-radius:8px;font:inherit">
@@ -1699,10 +1740,23 @@ fn upload_form_html(cfg: &Config) -> String {
 
 const UPLOAD_JS: &str = r#"
 const MAXB=__MAXB__*1048576;
+const CHUNK=48*1048576;
 function fmt(n){if(n<1024)return n+' B';if(n<1048576)return (n/1024).toFixed(1)+' KB';return (n/1048576).toFixed(1)+' MB'}
 function esc(s){return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
 function picked(){return [...document.getElementById('f').files,...document.getElementById('c').files]}
 function names(){const p=picked();document.getElementById('names').textContent=p.length?('已选 '+p.length+' 个：'+p.map(f=>f.name+' ('+fmt(f.size)+')').join('、')):'还没选。'}
+function id32(){let s='';for(let i=0;i<32;i++)s+='0123456789abcdef'[Math.floor(Math.random()*16)];return s}
+function keyq(){const q=new URLSearchParams(location.search);const k=q.get('key');return k?'&key='+encodeURIComponent(k):''}
+function post(u,blob,onprog){return new Promise(res=>{
+  const x=new XMLHttpRequest();
+  x.open('POST',u,true);
+  x.timeout=1200000;
+  x.upload.onprogress=e=>{if(e.lengthComputable&&onprog)onprog(e.loaded/e.total)};
+  x.onload=()=>{try{res(JSON.parse(x.responseText))}catch(_){res({ok:false,error:'服务端回了看不懂的内容（'+x.status+'）'})}};
+  x.onerror=()=>res({ok:false,error:'这一片断了：隧道掉线，或者被上游掐了'});
+  x.ontimeout=()=>res({ok:false,error:'这一片超时了'});
+  x.send(blob);
+})}
 async function go(){
   const files=picked();
   if(!files.length){toast('先选文件');return}
@@ -1717,28 +1771,314 @@ async function go(){
     const bar=document.createElement('i');const bw=document.createElement('div');bw.className='bar';bw.append(bar);
     const st=document.createElement('div');
     li.append(t,bw,st);list.append(li);
-    if(fl.size>MAXB){st.innerHTML='<span class=bad>超过上限，跳过。这种还是先用电脑往手机发。</span>';bad++;continue}
-    bar.style.width='2%';
-    const r=await one(fl,dir.value,sub,bar);
+    if(fl.size>MAXB){st.innerHTML='<span class=bad>超过上限，跳过。想传更大的：电脑上 postbox config upload_max_mb 调高，或者连同一个 Wi-Fi 直传。</span>';bad++;continue}
+    bar.style.width='1%';
+    const r=await sendFile(fl,dir.value,sub,bar);
     if(r.ok){ok++;bar.style.width='100%';st.innerHTML='<span class=ok>已存到 '+esc(r.where)+'</span>'}
     else{bad++;st.innerHTML='<span class=bad>'+esc(r.error||('失败 '+(r.status||'')))+'</span>'}
   }
   toast('完成：成功 '+ok+' 个'+(bad?('，失败 '+bad+' 个'):''));
 }
-function one(fl,dir,sub,bar){return new Promise(res=>{
-  const q=new URLSearchParams(location.search);
-  let u='/api/upload?d='+encodeURIComponent(dir)+'&sub='+encodeURIComponent(sub)+'&n='+encodeURIComponent(fl.name);
-  if(q.get('key'))u+='&key='+encodeURIComponent(q.get('key'));
-  const x=new XMLHttpRequest();
-  x.open('POST',u,true);
-  x.upload.onprogress=e=>{if(e.lengthComputable)bar.style.width=Math.max(2,e.loaded/e.total*100).toFixed(1)+'%'};
-  x.onload=()=>{try{res(JSON.parse(x.responseText))}catch(_){res({ok:false,error:'服务端回了看不懂的内容（'+x.status+'）'})}};
-  x.onerror=()=>res({ok:false,error:'传输断了：可能是隧道掉线，或者文件太大被上游拒收'});
-  x.ontimeout=()=>res({ok:false,error:'超时了'});
-  x.timeout=600000;
-  x.send(fl);
-})}
+// 小文件一发完事；大文件切片逐发，服务器每片都回它实际收到哪了，断了从那片重发
+async function sendFile(fl,dir,sub,bar){
+  if(fl.size<=CHUNK){
+    const u='/api/upload?d='+encodeURIComponent(dir)+'&sub='+encodeURIComponent(sub)+'&n='+encodeURIComponent(fl.name)+keyq();
+    return post(u,fl,f=>bar.style.width=(f*100).toFixed(1)+'%');
+  }
+  const id=id32();
+  let off=0,last=-1,stall=0;
+  while(off<fl.size){
+    const end=Math.min(off+CHUNK,fl.size), span=end-off;
+    const u='/api/upload/chunk?id='+id+'&off='+off+'&total='+fl.size+'&d='+encodeURIComponent(dir)
+      +'&sub='+encodeURIComponent(sub)+'&n='+encodeURIComponent(fl.name)+keyq();
+    const r=await post(u,fl.slice(off,end),f=>bar.style.width=((off+f*span)/fl.size*100).toFixed(1)+'%');
+    if(r.ok&&r.done){return r}
+    if(r.received===undefined){return r}
+    const next=r.received;
+    if(next===last){stall++;if(stall>=4){return {ok:false,error:'连续四次没有进展，先停在这里；重开页面重传这个文件'}}}else{stall=0}
+    last=next;off=next;
+  }
+  return {ok:false,error:'切片发完了，但没等到完成回执'};
+}
 "#;
+
+/// 分块上传的会话号：手机生成的十六进制串。它会变成 `data/tmp/up-<id>.part` 这样的文件名，
+/// 所以形状必须卡死，不给任何路径字符留机会。
+fn valid_upload_id(s: &str) -> bool {
+    s.len() == 32 && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// 会话在第一块里定下来的东西，存在 `data/tmp/up-<id>.json`；之后的请求只带会话号。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ChunkMeta {
+    dir: String,
+    sub: String,
+    name: String,
+    total: u64,
+}
+
+/// 这一块该不该收。只允许顺序追加：偏移对不上就把已经收到的字节数报回去，让手机从那一段
+/// 重传。这样中途断线、半截块落盘都能自愈，服务器不用另记状态。
+#[derive(Debug, PartialEq, Eq)]
+enum ChunkPlan {
+    Append,
+    Resync { received: u64 },
+    TooBig { total: u64 },
+}
+
+fn plan_chunk(received: u64, offset: u64, len: u64, total: u64) -> ChunkPlan {
+    if offset != received {
+        return ChunkPlan::Resync { received };
+    }
+    if received.saturating_add(len) > total {
+        return ChunkPlan::TooBig { total };
+    }
+    ChunkPlan::Append
+}
+
+/// 大文件走这里。Cloudflare 快速隧道大约 150 秒就会掐断一个请求（这台机器实测 1.5 MB/s：
+/// 200 MB 能过、300 MB 过不去），所以切成片逐片传，每片各自重试。
+async fn api_upload_chunk(
+    State(st): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+    req: axum::extract::Request,
+) -> Response {
+    use futures_util::TryStreamExt;
+    use tokio::io::AsyncReadExt;
+    let cfg = st.current_cfg();
+    if !key_matches(&cfg, &headers, &q) {
+        return json_err(StatusCode::UNAUTHORIZED, "没有访问密钥，传不了。");
+    }
+    let Some(id) = q.get("id").map(|s| s.trim()).filter(|s| valid_upload_id(s)) else {
+        return json_err(StatusCode::BAD_REQUEST, "会话号不对。");
+    };
+    let id = id.to_string();
+    let Some(offset) = q.get("off").and_then(|s| s.trim().parse::<u64>().ok()) else {
+        return json_err(StatusCode::BAD_REQUEST, "没说要接到哪个位置。");
+    };
+    let part_now = st.root.join("tmp").join(format!("up-{id}.part"));
+    let held = {
+        let mut g = match st.chunk_busy.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        g.insert(id.clone())
+    };
+    let _guard = if held {
+        SessionGuard {
+            set: &st.chunk_busy,
+            id: id.clone(),
+        }
+    } else {
+        // 这一片的写入者还在里面，让手机按当前进度重来
+        let have = tokio::fs::metadata(&part_now)
+            .await
+            .map(|m| m.len())
+            .unwrap_or(0);
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"ok": false, "received": have,
+                        "error": "这个会话正在写上一片，稍等再从 received 发"})),
+        )
+            .into_response();
+    };
+    let declared = match headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+    {
+        Some(n) if n > 0 => n,
+        Some(_) => return json_err(StatusCode::BAD_REQUEST, "这一片是空的。"),
+        None => return json_err(StatusCode::LENGTH_REQUIRED, "浏览器没报这一片的大小。"),
+    };
+    let tmp = st.root.join("tmp");
+    let part = tmp.join(format!("up-{id}.part"));
+    let meta_path = tmp.join(format!("up-{id}.json"));
+    let drop_session = |code: StatusCode, msg: &str| {
+        let _ = std::fs::remove_file(&meta_path);
+        let _ = std::fs::remove_file(&part);
+        json_err(code, msg)
+    };
+    // 会话元数据：第一块写、之后读。读不懂就整个作废，让手机重传这个文件
+    let meta: ChunkMeta = match tokio::fs::read(&meta_path).await {
+        Ok(bytes) => match serde_json::from_slice(&bytes) {
+            Ok(m) => m,
+            Err(_) => {
+                return drop_session(
+                    StatusCode::BAD_REQUEST,
+                    "这个上传会话在电脑上坏了，请重传这个文件。",
+                )
+            }
+        },
+        Err(_) => {
+            let dest = match upload_target(&cfg, &q) {
+                Ok(v) => v,
+                Err((c, m)) => return json_err(c, &m),
+            };
+            let Some(total) = q.get("total").and_then(|s| s.trim().parse::<u64>().ok()) else {
+                return json_err(StatusCode::BAD_REQUEST, "没说这个文件总共多大。");
+            };
+            let max = cfg.upload_max_mb as u64 * 1024 * 1024;
+            if total == 0 {
+                return json_err(StatusCode::BAD_REQUEST, "这个文件是空的。");
+            }
+            if total > max {
+                return json_err(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    &format!(
+                        "单个文件上限 {}（电脑上 postbox config upload_max_mb 可以调）。",
+                        mb_label(cfg.upload_max_mb)
+                    ),
+                );
+            }
+            if offset != 0 {
+                return json_err(
+                    StatusCode::BAD_REQUEST,
+                    "一个新会话的第一片必须从 0 开始，请重传这个文件。",
+                );
+            }
+            if let Err(e) = tokio::fs::create_dir_all(&tmp).await {
+                return json_err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("电脑上建不了临时目录：{e}"),
+                );
+            }
+            let m = ChunkMeta {
+                dir: dest.dir.clone(),
+                sub: dest.sub.clone(),
+                name: dest.name.clone(),
+                total,
+            };
+            let body = match serde_json::to_vec(&m) {
+                Ok(b) => b,
+                Err(e) => return json_err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+            };
+            if let Err(e) = tokio::fs::write(&meta_path, &body).await {
+                return json_err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("电脑上写不了会话文件：{e}"),
+                );
+            }
+            m
+        }
+    };
+    let received = tokio::fs::metadata(&part)
+        .await
+        .map(|m| m.len())
+        .unwrap_or(0);
+    match plan_chunk(received, offset, declared, meta.total) {
+        // 位置对不上：什么都不删，已收到的前缀仍然有效，手机从 received 接着发
+        ChunkPlan::Resync { received } => {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({"ok": false, "received": received,
+                            "error": "位置对不上，从 received 那里接着传"})),
+            )
+                .into_response();
+        }
+        ChunkPlan::TooBig { .. } => {
+            return drop_session(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "这片发过来会超过说好的总大小。",
+            )
+        }
+        ChunkPlan::Append => {}
+    }
+    let mut file = match tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&part)
+        .await
+    {
+        Ok(f) => f,
+        Err(e) => {
+            return json_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("电脑上写不了临时目录：{e}"),
+            )
+        }
+    };
+    let stream = req
+        .into_body()
+        .into_data_stream()
+        .map_err(std::io::Error::other);
+    let mut src = tokio_util::io::StreamReader::new(stream).take(declared + 1);
+    let written = match tokio::time::timeout(
+        Duration::from_secs(1800),
+        tokio::io::copy(&mut src, &mut file),
+    )
+    .await
+    {
+        Err(_) => {
+            drop(file);
+            return json_err(
+                StatusCode::REQUEST_TIMEOUT,
+                "这一片卡了 30 分钟没传完，先停在这里。",
+            );
+        }
+        Ok(Err(e)) => {
+            // 半截片：留着。报真实进度回去，手机从那里续传
+            drop(file);
+            let now = tokio::fs::metadata(&part)
+                .await
+                .map(|m| m.len())
+                .unwrap_or(0);
+            return (
+                StatusCode::OK,
+                Json(json!({"ok": false, "received": now,
+                            "error": format!("这一片断了（{e}），从 received 续传")})),
+            )
+                .into_response();
+        }
+        Ok(Ok(n)) => n,
+    };
+    drop(file);
+    let now = tokio::fs::metadata(&part)
+        .await
+        .map(|m| m.len())
+        .unwrap_or(0);
+    if written != declared || now != received + declared {
+        return (
+            StatusCode::OK,
+            Json(json!({"ok": false, "received": now, "error": "这一片没传满，从 received 续传"})),
+        )
+            .into_response();
+    }
+    if now < meta.total {
+        return (
+            StatusCode::OK,
+            Json(json!({"ok": true, "done": false, "received": now})),
+        )
+            .into_response();
+    }
+    // 收满了。落点重新按白名单解析一遍：中途被收回、或被换成指向系统盘的链接，都得拒绝
+    let dest = match resolve_dest(&cfg, &meta.dir, &meta.sub, &meta.name) {
+        Ok(v) => v,
+        Err((c, m)) => return drop_session(c, &m),
+    };
+    // 子目录是第一片时就定下的名字，但要等收满才真的建出来：中途作废的会话不该
+    // 在用户的目录里留下一堆空文件夹
+    if let Err(e) = tokio::fs::create_dir_all(&dest.target).await {
+        return drop_session(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("电脑上建不了那个子目录：{e}"),
+        );
+    }
+    let ip = client_ip(&addr, &headers);
+    let res = finalize_upload(&st, &dest, &part, now, &ip).await;
+    let _ = tokio::fs::remove_file(&meta_path).await;
+    match res {
+        Ok(where_saved) => (
+            StatusCode::OK,
+            Json(json!({"ok": true, "done": true, "where": where_saved,
+                        "size": now, "received": now})),
+        )
+            .into_response(),
+        Err(msg) => json_err(StatusCode::INTERNAL_SERVER_ERROR, &msg),
+    }
+}
 
 async fn api_upload(
     State(st): State<Arc<AppState>>,
@@ -1862,12 +2202,30 @@ async fn api_upload(
             ),
         );
     }
-    // 不覆盖同名原件：电脑上那份可能比手机上传的更重要。
-    // 只靠「先看存不存在、再改名」在并发下会互相覆盖（POSIX 的 rename 直接替换），
-    // 所以这里用 create_new 把名字原子地抢下来；抢不到就换一个名字重试。
+    let ip = client_ip(&addr, &headers);
+    match finalize_upload(&st, &dest, &part, written, &ip).await {
+        Ok(where_saved) => (
+            StatusCode::OK,
+            Json(json!({"ok": true, "where": where_saved, "size": written})),
+        )
+            .into_response(),
+        Err(msg) => json_err(StatusCode::INTERNAL_SERVER_ERROR, &msg),
+    }
+}
+
+/// 收完一个完整文件之后的公共动作：原子抢一个不冲突的名字、把 .part 改名过去、记一笔流水。
+/// 单发和分块两条路都走这里，所以「绝不覆盖」这条保证只有一份实现。
+async fn finalize_upload(
+    st: &Arc<AppState>,
+    dest: &UploadDest,
+    part: &std::path::Path,
+    size: u64,
+    ip: &str,
+) -> Result<String, String> {
+    let dir = &dest.target;
     let mut final_name: Option<String> = None;
     for _ in 0..50 {
-        let candidate = store::unique_name(&dir, &name);
+        let candidate = store::unique_name(dir, &dest.name);
         match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -1879,41 +2237,32 @@ async fn api_upload(
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => {
-                let _ = tokio::fs::remove_file(&part).await;
-                return json_err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("电脑上写不了那个目录：{e}"),
-                );
+                let _ = tokio::fs::remove_file(part).await;
+                return Err(format!("电脑上写不了那个目录：{e}"));
             }
         }
     }
     let Some(final_name) = final_name else {
-        let _ = tokio::fs::remove_file(&part).await;
-        return json_err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "同名文件太多，换个文件名再传。",
-        );
+        let _ = tokio::fs::remove_file(part).await;
+        return Err("同名文件太多，换个文件名再传。".to_string());
     };
-    // 占位是个空文件，rename 覆盖它覆盖的是自己抢到的名字
-    if let Err(e) = tokio::fs::rename(&part, dir.join(&final_name)).await {
-        let _ = tokio::fs::remove_file(&part).await;
-        return json_err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("落盘最后一步失败：{e}"),
-        );
+    // 占位是个空文件，rename 覆盖的是自己刚抢到的那个名字
+    if let Err(e) = tokio::fs::rename(part, dir.join(&final_name)).await {
+        let _ = tokio::fs::remove_file(part).await;
+        return Err(format!("落盘最后一步失败：{e}"));
     }
     let where_saved = if dest.sub.is_empty() {
         final_name.clone()
     } else {
-        format!("{}/{}", dest.sub.replace('\\', "/"), final_name)
+        format!("{}/{}", dest.sub.replace(['\\', '/'], "/"), final_name)
     };
     let rec = store::UploadRecord {
         ms: store::now_ms(),
-        dir: dest.dir,
-        sub: dest.sub,
+        dir: dest.dir.clone(),
+        sub: dest.sub.clone(),
         name: final_name,
-        size: written,
-        ip: client_ip(&addr, &headers),
+        size,
+        ip: ip.to_string(),
     };
     println!(
         "[上传] {} · {} · 来自 {}",
@@ -1925,11 +2274,7 @@ async fn api_upload(
         // 文件已经落盘了，记录写不进去不该让手机端看到失败
         eprintln!("提示: 上传记录没写进去（{e}）");
     }
-    (
-        StatusCode::OK,
-        Json(json!({"ok": true, "where": where_saved, "size": written})),
-    )
-        .into_response()
+    Ok(where_saved)
 }
 
 async fn api_feedback(
@@ -2011,6 +2356,7 @@ pub async fn serve(root: PathBuf, cfg: Config) -> anyhow::Result<()> {
         root,
         cfg: cfg.clone(),
         fb_hits: Mutex::new(HashMap::new()),
+        chunk_busy: Mutex::new(std::collections::HashSet::new()),
     });
     let app = Router::new()
         .route("/", get(home))
@@ -2024,6 +2370,7 @@ pub async fn serve(root: PathBuf, cfg: Config) -> anyhow::Result<()> {
         .route("/upload", get(upload_page))
         .route("/api/feedback/{token}", axum::routing::post(api_feedback))
         .route("/api/upload", axum::routing::post(api_upload))
+        .route("/api/upload/chunk", axum::routing::post(api_upload_chunk))
         .layer(middleware::from_fn(security_headers))
         .with_state(st.clone());
     let bind = if cfg.bind.trim().is_empty() {
@@ -2206,6 +2553,48 @@ mod tests {
     }
 
     /// 上传页绝不能出现明文访问密钥 —— 和文件页同一条规矩。
+    #[test]
+    fn chunk_plan_only_appends_in_order() {
+        // 顺序对上就收
+        assert_eq!(plan_chunk(0, 0, 48, 100), ChunkPlan::Append);
+        assert_eq!(plan_chunk(48, 48, 48, 100), ChunkPlan::Append);
+        // 偏移不对：把已收到的位置报回去，让手机从那片重发（断线续传就靠这个）
+        assert_eq!(
+            plan_chunk(48, 96, 48, 100),
+            ChunkPlan::Resync { received: 48 }
+        );
+        assert_eq!(
+            plan_chunk(48, 0, 48, 100),
+            ChunkPlan::Resync { received: 48 }
+        );
+        // 超过说好的总大小：整个会话作废，不能让人拿分块接口写超额磁盘
+        assert_eq!(
+            plan_chunk(60, 60, 41, 100),
+            ChunkPlan::TooBig { total: 100 }
+        );
+        // 最后一块刚好收满
+        assert_eq!(plan_chunk(96, 96, 4, 100), ChunkPlan::Append);
+        // 加法不能溢出
+        assert_eq!(
+            plan_chunk(0, 0, u64::MAX, 100),
+            ChunkPlan::TooBig { total: 100 }
+        );
+    }
+
+    #[test]
+    fn chunk_session_ids_are_boring_on_purpose() {
+        assert!(valid_upload_id(&"a".repeat(32)));
+        assert!(valid_upload_id("0123456789abcdef0123456789abcdef"));
+        // 这些会进文件名，一个都不许过
+        assert!(!valid_upload_id(""));
+        assert!(!valid_upload_id("../../etc/passwd"));
+        assert!(!valid_upload_id("a/../b"));
+        assert!(!valid_upload_id(&"a".repeat(31)));
+        assert!(!valid_upload_id(&"a".repeat(65)));
+        assert!(!valid_upload_id("deadbeef:stream"));
+        assert!(!valid_upload_id("deadbeef\\stream"));
+    }
+
     #[test]
     fn upload_page_never_leaks_access_key() {
         let dir = std::env::temp_dir().join(format!("postbox-upage-{}", store::now_ms()));
@@ -2668,6 +3057,7 @@ mod tests {
                 upload_max_mb: store::UPLOAD_MAX_DEFAULT_MB,
             },
             fb_hits: Mutex::new(HashMap::new()),
+            chunk_busy: Mutex::new(std::collections::HashSet::new()),
         })
     }
 

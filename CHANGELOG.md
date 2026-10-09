@@ -20,10 +20,13 @@ All notable changes to this project are documented here. The format follows
     through `sanitize_name`, and the result is asserted to stay under the chosen entry.
   - An existing file is never overwritten: `报告.pdf` becomes `报告 (1).pdf`.
   - `upload_max_mb` sets the app's own per-file cap (default 100, ceiling 2048) and is read
-    live, so no restart. The free tunnel has its own opinion: measured at ~1.5 MB/s, 200 MB
-    got through three times and 300 MB was refused by Cloudflare at ~170 s (524) — the wall
-    over the tunnel is request duration, not bytes. Same build over the LAN: 300 MB in 4.8 s.
-    The page states the limit before the transfer instead of dying at 90%.
+    live, so no restart. The page states the limit before the transfer instead of dying at 90%.
+  - Files over 48 MB are uploaded in chunks (`POST /api/upload/chunk`): each piece is its own
+    request, appended in order to `data/tmp/up-<id>.part`, and the response carries how many
+    bytes the PC actually holds, so a dropped piece is re-sent from that offset instead of
+    restarting the file. This exists because the free tunnel kills a single long request —
+    measured at ~1.5 MB/s: 60 MB 3/3 through, 200 MB 3/3, 300 MB 0/2 with both attempts dying
+    at ~170 s (HTTP 524). Chunked, the same 300 MB arrives intact.
   - Uploads require `access_key`, and metadata (time, folder, name, size, client IP) is
     appended to `data/inbox/uploads.jsonl`. No copy is kept in `data/` — the file lands where
     you pointed it and nowhere else.
