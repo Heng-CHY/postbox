@@ -61,7 +61,7 @@ folder and the phone can send files the other way too.
 | **Preview** | Markdown, images, PDF, audio, video, code, diffs, `.docx`, `.xlsx/.xls/.ods`, `.csv/.tsv` as tables, indented `.json`, a file listing for `.zip`/`.tar.gz`, and `.html` reports rendered in a script-free sandbox. Media is served with HTTP `Range`, so video starts without the whole file arriving first and the seek bar works |
 | **Download / forward** | correct UTF-8 filenames; the link works for anyone, no account, no app |
 | **Feedback** | a note box on the page, appended to `data/inbox/feedback.jsonl` |
-| **Upload** | the other direction: open a folder with `postbox upload add D:\somewhere` and the phone can push files into it, into a subfolder you name on the spot. Anything over 512 KB is sliced into small chunks and resumed piece by piece |
+| **Upload** | the other direction: open a folder with `postbox upload add D:\somewhere` and the phone can push files into it, into a subfolder you name on the spot. Anything over 512 KB is sliced into small chunks and resumed piece by piece; each file is a row with its own pause / resume / cancel / retry |
 | **Share** | `postbox share add D:\library` opens a folder both ways: the phone browses it, previews and downloads anything in it with the same renderer as bundles, and uploads back into any subfolder |
 | **Expiry** | bundles self-delete (30 days by default, `--days 0` to keep forever) |
 | **Agent control** | an MCP stdio server with 5 tools; hardening covered in [SECURITY.md](SECURITY.md) |

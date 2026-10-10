@@ -38,6 +38,32 @@ pub struct AppState {
     pub chunk_busy: Mutex<std::collections::HashSet<String>>,
 }
 
+/// 还没读完请求体就要回话时，先把体读完再回。
+///
+/// 不读完就返回，连接会被直接掐掉，浏览器只能报一个网络错误（status 0），拿不到这里给的
+/// `received` —— 而「从电脑确认过的位置接着传」全靠那个数。手机按暂停后立刻点继续，
+/// 位置就会对不上，走的正是这条路。
+async fn refuse_with_body(
+    body: axum::body::Body,
+    code: StatusCode,
+    payload: serde_json::Value,
+) -> Response {
+    use futures_util::StreamExt;
+    let mut data = body.into_data_stream();
+    let mut drained = 0u64;
+    while let Some(chunk) = data.next().await {
+        match chunk {
+            Ok(b) => drained += b.len() as u64,
+            Err(_) => break,
+        }
+        // 正常一片只有 512 KB，超出来的就是乱来的客户端，不必奉陪
+        if drained > 32 * 1024 * 1024 {
+            break;
+        }
+    }
+    (code, Json(payload)).into_response()
+}
+
 /// 会话占用标记：离开作用域自动释放，错误分支也不会把会话永久锁住
 struct SessionGuard<'a> {
     set: &'a Mutex<std::collections::HashSet<String>>,
@@ -351,6 +377,15 @@ ul.upl{list-style:none;margin:12px 0 0;padding:0}
 ul.upl li{padding:9px 0;border-top:1px solid var(--line);font-size:13.5px;word-break:break-all}
 .upl .ok{color:#3f7d4e}
 .upl .bad{color:var(--acc-d)}
+.upname{font-weight:600}
+.upst{font-size:12.5px;color:var(--muted);margin-top:3px;line-height:1.55}
+.upst .ok{color:#3f7d4e}
+.upst .bad{color:var(--acc-d)}
+.upbtns{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+.btn.mini{padding:5px 13px;font-size:13px}
+.btn.danger{color:var(--acc-d) !important;border-color:#e8cabd}
+.btn[disabled]{opacity:.45;cursor:default}
+.btn[disabled]:hover{background:var(--acc)}
 "#;
 
 fn page(title: &str, body: &str) -> String {
@@ -1860,7 +1895,7 @@ fn upload_form_html(cfg: &Config) -> String {
     format!(
         r#"<header class=top><a class=back href="/">← 全部文件</a><span class=badge>手机 → 电脑</span></header>
 <div class=card><h1>传到电脑上</h1>
-<p class=hint>选目录、选文件，然后点上传。单个文件 {cap} 以内。超过 512 KB 会自动切成小片一片一片传，哪一片没到就重传那一片 —— 免费隧道大约 100~170 秒就会掐断一个请求，切片就是为了绕开它。隧道慢的时候大文件确实要等，同一个 Wi-Fi 下直连电脑快得多。</p>
+<p class=hint>选目录、选文件，然后点上传。单个文件 {cap} 以内。超过 512 KB 会自动切成小片一片一片传，哪一片没到就重传那一片 —— 免费隧道大约 100~170 秒就会掐断一个请求，切片就是为了绕开它。隧道慢的时候大文件确实要等，同一个 Wi-Fi 下直连电脑快得多。<b>每个文件一行，各自可以暂停、继续、取消、重试</b>；一行成了就是成了，不影响别的行。</p>
 <h3 class=sub>存到哪个目录</h3>{dirs}
 <h3 class=sub>再放进哪个小文件夹（可选）</h3>
 <input id=sub value="{today}" style="width:100%;padding:10px;border:1px solid var(--line);border-radius:8px;font:inherit">
@@ -1880,67 +1915,156 @@ fn upload_form_html(cfg: &Config) -> String {
 
 const UPLOAD_JS: &str = r#"
 const MAXB=__MAXB__*1048576;
+const CAP=fmt(MAXB);
 // 一片 512 KB：免费隧道的上行能掉到 10 KB/s 级，而一个请求大约 100~170 秒就被掐。
-// 一片要在几十秒内发完才谈得上「断了只重传那一片」，48 MB 一片在这种速度下等于必挂。
+// 一片要在几十秒内发完才谈得上「断了只重传那一片」，整发在这种速度下等于必挂。
 const CHUNK=512*1024;
+// 一律走分块接口：小文件也只是一片，换来的是每个文件都能单独暂停、继续、取消、重试
 function fmt(n){if(n<1024)return n+' B';if(n<1048576)return (n/1024).toFixed(1)+' KB';return (n/1048576).toFixed(1)+' MB'}
 function esc(s){return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
 function picked(){return [...document.getElementById('f').files,...document.getElementById('c').files]}
 function names(){const p=picked();document.getElementById('names').textContent=p.length?('已选 '+p.length+' 个：'+p.map(f=>f.name+' ('+fmt(f.size)+')').join('、')):'还没选。'}
 function id32(){let s='';for(let i=0;i<32;i++)s+='0123456789abcdef'[Math.floor(Math.random()*16)];return s}
 function keyq(){const q=new URLSearchParams(location.search);const k=q.get('key');return k?'&key='+encodeURIComponent(k):''}
-function post(u,blob,onprog){return new Promise(res=>{
-  const x=new XMLHttpRequest();
-  x.open('POST',u,true);
-  x.timeout=1200000;
-  x.upload.onprogress=e=>{if(e.lengthComputable&&onprog)onprog(e.loaded/e.total)};
-  x.onload=()=>{try{res(JSON.parse(x.responseText))}catch(_){res({ok:false,error:'服务端回了看不懂的内容（'+x.status+'）'})}};
-  x.onerror=()=>res({ok:false,error:'这一片断了：隧道掉线，或者被上游掐了'});
-  x.ontimeout=()=>res({ok:false,error:'这一片超时了'});
-  x.send(blob);
-})}
+function sleep(ms){return new Promise(r=>setTimeout(r,ms))}
+const jobs=[];
+
+function setGo(){
+  const b=document.getElementById('go');
+  const running=jobs.some(j=>j.state==='running');
+  const paused=jobs.some(j=>j.state==='paused');
+  b.disabled=running||paused;
+  b.textContent=running?'这一批正在传…':(paused?'这一批暂停中，先继续或取消那一条':'上传');
+}
+function mkJob(fl,dir,sub){
+  const li=document.createElement('li');
+  const t=document.createElement('div');t.className='upname';t.textContent=fl.name+' · '+fmt(fl.size);
+  const bar=document.createElement('i');
+  const bw=document.createElement('div');bw.className='bar';bw.append(bar);
+  const st=document.createElement('div');st.className='upst';
+  const bt=document.createElement('div');bt.className='upbtns';
+  li.append(t,bw,st,bt);
+  return {fl,li,bar,st,bt,dir,sub,off:0,id:id32(),state:'ready',xhr:null,waiters:[],pauseReq:false};
+}
+function button(j,label,fn,danger){
+  const e=document.createElement('button');
+  e.className='btn ghost mini'+(danger?' danger':'');
+  e.textContent=label;
+  e.onclick=fn;
+  j.bt.append(e);
+}
+function paint(j,msg,kind){
+  j.bar.style.width=(j.fl.size?j.off/j.fl.size*100:0).toFixed(1)+'%';
+  if(msg!==undefined){j.st.innerHTML=kind?('<span class='+kind+'>'+msg+'</span>'):msg}
+  j.bt.innerHTML='';
+  if(j.state==='running'){button(j,'暂停',()=>pause(j));button(j,'取消',()=>cancel(j),1)}
+  else if(j.state==='paused'){button(j,'继续',()=>run(j));button(j,'取消',()=>cancel(j),1)}
+  else if(j.state==='failed'){button(j,'重试',()=>run(j))}
+  else if(j.state==='canceled'){button(j,'从头再传',()=>{j.off=0;j.id=id32();run(j)})}
+  setGo();
+  if(j.state!=='running'){const w=j.waiters;j.waiters=[];w.forEach(f=>f())}
+}
+function stop(j){if(j.xhr){try{j.xhr.abort()}catch(_){}} j.xhr=null}
+function pause(j){
+  // 不掐当前这一片：掐了服务端还要等它自己超时才放开会话，反而更慢。
+  // 等这 512 KB 落完就停，位置是电脑确认过的，点继续立刻能接着发。
+  if(j.state!=='running')return;
+  j.pauseReq=true;
+  paint(j,'正在停下：等这一片传完就停');
+  const b=[...j.bt.querySelectorAll('button')].find(x=>x.textContent==='暂停');
+  if(b){b.disabled=true;b.textContent='正在停下…'}
+}
+function cancel(j){
+  if(j.state!=='running'&&j.state!=='paused')return;
+  j.state='canceled';stop(j);
+  paint(j,'已取消，这个文件没进电脑','bad');
+}
+function whenIdle(j){return j.state==='running'?new Promise(r=>j.waiters.push(r)):Promise.resolve()}
+function piece(j,end){
+  return new Promise(res=>{
+    const x=new XMLHttpRequest();
+    j.xhr=x;
+    const u='/api/upload/chunk?id='+j.id+'&off='+j.off+'&total='+j.fl.size+'&d='+encodeURIComponent(j.dir)
+      +'&sub='+encodeURIComponent(j.sub)+'&n='+encodeURIComponent(j.fl.name)+keyq();
+    x.open('POST',u,true);
+    x.timeout=600000;
+    x.upload.onprogress=e=>{
+      if(!e.lengthComputable)return;
+      const span=Math.max(1,end-j.off);
+      const done=Math.min(j.off+Math.min(e.loaded,span),end);
+      j.bar.style.width=(done/j.fl.size*100).toFixed(1)+'%';
+    };
+    x.onload=()=>{
+      let r;
+      try{r=JSON.parse(x.responseText)}
+      catch(_){r={ok:false,received:j.off,error:'隧道或电脑回了看不懂的内容（'+x.status+'）'}}
+      res(r);
+    };
+    x.onerror=()=>res({ok:false,received:j.off,error:'这一片断了：隧道掉线，或者被上游掐了'});
+    x.ontimeout=()=>res({ok:false,received:j.off,error:'这一片 10 分钟没传完'});
+    x.onabort=()=>res({aborted:true});
+    x.send(j.fl.slice(j.off,end));
+  });
+}
+async function run(j){
+  if(j.state==='running')return;
+  if(j.fl.size>MAXB){j.state='failed';paint(j,'超过上限 '+CAP+'，没传。电脑上 postbox config upload_max_mb 可以调高','bad');return}
+  j.state='running';
+  paint(j,'正在传…');
+  let stall=0,last=-1;
+  while(j.state==='running'&&j.off<j.fl.size){
+    const end=Math.min(j.off+CHUNK,j.fl.size);
+    const r=await piece(j,end);
+    j.xhr=null;
+    if(r.aborted||j.state!=='running')return;
+    if(r.ok&&r.done){
+      j.off=j.fl.size;j.state='done';
+      paint(j,'已存到 '+esc(r.where)+'（'+fmt(r.size)+'）','ok');
+      return;
+    }
+    if(j.pauseReq){
+      j.pauseReq=false;j.state='paused';
+      paint(j,'已停在 '+fmt(j.off)+'，点继续会从电脑确认过的位置接着传');
+      return;
+    }
+    const got=typeof r.received==='number'?r.received:j.off;
+    stall=(got===last)?stall+1:0;
+    last=got;j.off=got;
+    if(stall>=4){j.state='failed';paint(j,(r.error||'这一片反复传不过去')+' —— 连着四次没有进展，先停在这里。可以再点重试','bad');return}
+    paint(j,'已收到 '+fmt(j.off)+' / '+fmt(j.fl.size)+(r.error?('（'+esc(r.error)+'）'):''));
+    // 上一片可能还在电脑上收尾（尤其刚按过暂停），等一秒再发下一片，别把重试打成连发
+    if(!r.ok)await sleep(1200);
+  }
+  if(j.state==='running'){j.state='failed';paint(j,'切片发完了，但没等到完成回执。点重试','bad')}
+}
+async function drive(j){
+  if(j.state==='ready')run(j);
+  while(j.state==='running'||j.state==='paused'){
+    await whenIdle(j);
+    if(j.state==='paused')await sleep(400);
+  }
+}
 async function go(){
+  if(jobs.some(j=>j.state==='running'||j.state==='paused')){toast('这一批还没结束，先暂停或取消那一条');return}
   const files=picked();
   if(!files.length){toast('先选文件');return}
   const dir=document.querySelector('input[name=dir]:checked');
   if(!dir){toast('先选一个目录');return}
   const sub=document.getElementById('sub').value.trim();
-  const list=document.getElementById('ul');list.innerHTML='';
-  let ok=0,bad=0;
+  jobs.length=0;
+  const ul=document.getElementById('ul');ul.innerHTML='';
   for(const fl of files){
-    const li=document.createElement('li');
-    const t=document.createElement('div');t.textContent=fl.name+' · '+fmt(fl.size);
-    const bar=document.createElement('i');const bw=document.createElement('div');bw.className='bar';bw.append(bar);
-    const st=document.createElement('div');
-    li.append(t,bw,st);list.append(li);
-    if(fl.size>MAXB){st.innerHTML='<span class=bad>超过上限，跳过。想传更大的：电脑上 postbox config upload_max_mb 调高，或者连同一个 Wi-Fi 直传。</span>';bad++;continue}
-    bar.style.width='1%';
-    const r=await sendFile(fl,dir.value,sub,bar);
-    if(r.ok){ok++;bar.style.width='100%';st.innerHTML='<span class=ok>已存到 '+esc(r.where)+'</span>'}
-    else{bad++;st.innerHTML='<span class=bad>'+esc(r.error||('失败 '+(r.status||'')))+'</span>'}
+    const j=mkJob(fl,dir.value,sub);
+    jobs.push(j);ul.append(j.li);
+    if(!fl.size){j.state='failed';paint(j,'这个文件是空的','bad')}
+    else{paint(j,'等着')}
   }
-  toast('完成：成功 '+ok+' 个'+(bad?('，失败 '+bad+' 个'):''));
-}
-// 512 KB 以内一发完事；再大的切成片逐发，服务器每片都回它实际收到哪了，断了从那片重发
-async function sendFile(fl,dir,sub,bar){
-  if(fl.size<=CHUNK){
-    const u='/api/upload?d='+encodeURIComponent(dir)+'&sub='+encodeURIComponent(sub)+'&n='+encodeURIComponent(fl.name)+keyq();
-    return post(u,fl,f=>bar.style.width=(f*100).toFixed(1)+'%');
-  }
-  const id=id32();
-  let off=0,last=-1,stall=0;
-  while(off<fl.size){
-    const end=Math.min(off+CHUNK,fl.size), span=end-off;
-    const u='/api/upload/chunk?id='+id+'&off='+off+'&total='+fl.size+'&d='+encodeURIComponent(dir)
-      +'&sub='+encodeURIComponent(sub)+'&n='+encodeURIComponent(fl.name)+keyq();
-    const r=await post(u,fl.slice(off,end),f=>bar.style.width=((off+f*span)/fl.size*100).toFixed(1)+'%');
-    if(r.ok&&r.done){return r}
-    if(r.received===undefined){return r}
-    const next=r.received;
-    if(next===last){stall++;if(stall>=4){return {ok:false,error:'连续四次没有进展，先停在这里；重开页面重传这个文件'}}}else{stall=0}
-    last=next;off=next;
-  }
-  return {ok:false,error:'切片发完了，但没等到完成回执'};
+  setGo();
+  for(const j of jobs){if(j.state==='ready')await drive(j)}
+  setGo();
+  const ok=jobs.filter(j=>j.state==='done').length;
+  const bad=jobs.filter(j=>j.state==='failed'||j.state==='canceled').length;
+  toast('这一批：完成 '+ok+' 个'+(bad?('，没传成 '+bad+' 个'):''));
 }
 "#;
 
@@ -1988,7 +2112,6 @@ async fn api_upload_chunk(
     req: axum::extract::Request,
 ) -> Response {
     use futures_util::TryStreamExt;
-    use tokio::io::AsyncReadExt;
     let cfg = st.current_cfg();
     if !key_matches(&cfg, &headers, &q) {
         return json_err(StatusCode::UNAUTHORIZED, "没有访问密钥，传不了。");
@@ -2019,12 +2142,13 @@ async fn api_upload_chunk(
             .await
             .map(|m| m.len())
             .unwrap_or(0);
-        return (
+        return refuse_with_body(
+            req.into_body(),
             StatusCode::CONFLICT,
-            Json(json!({"ok": false, "received": have,
-                        "error": "这个会话正在写上一片，稍等再从 received 发"})),
+            json!({"ok": false, "received": have,
+                   "error": "这个会话正在写上一片，稍等再从 received 发"}),
         )
-            .into_response();
+        .await;
     };
     let declared = match headers
         .get(header::CONTENT_LENGTH)
@@ -2113,18 +2237,23 @@ async fn api_upload_chunk(
     match plan_chunk(received, offset, declared, meta.total) {
         // 位置对不上：什么都不删，已收到的前缀仍然有效，手机从 received 接着发
         ChunkPlan::Resync { received } => {
-            return (
+            return refuse_with_body(
+                req.into_body(),
                 StatusCode::CONFLICT,
-                Json(json!({"ok": false, "received": received,
-                            "error": "位置对不上，从 received 那里接着传"})),
+                json!({"ok": false, "received": received,
+                       "error": "位置对不上，从 received 那里接着传"}),
             )
-                .into_response();
+            .await;
         }
         ChunkPlan::TooBig { .. } => {
-            return drop_session(
+            let _ = tokio::fs::remove_file(&meta_path).await;
+            let _ = tokio::fs::remove_file(&part).await;
+            return refuse_with_body(
+                req.into_body(),
                 StatusCode::PAYLOAD_TOO_LARGE,
-                "这片发过来会超过说好的总大小。",
+                json!({"ok": false, "error": "这片发过来会超过说好的总大小。"}),
             )
+            .await;
         }
         ChunkPlan::Append => {}
     }
@@ -2146,36 +2275,40 @@ async fn api_upload_chunk(
         .into_body()
         .into_data_stream()
         .map_err(std::io::Error::other);
-    let mut src = tokio_util::io::StreamReader::new(stream).take(declared + 1);
-    let written = match tokio::time::timeout(
-        Duration::from_secs(1800),
-        tokio::io::copy(&mut src, &mut file),
-    )
-    .await
-    {
-        Err(_) => {
-            drop(file);
-            return json_err(
-                StatusCode::REQUEST_TIMEOUT,
-                "这一片卡了 30 分钟没传完，先停在这里。",
-            );
+    tokio::pin!(stream);
+    // 一片之内 30 秒没有新字节，就算这片已经断了。客户端按暂停或掉线时，服务端可能一直卡在
+    // 读上，而它卡着的那段时间这个会话是锁住的 —— 手机点继续只会撞回「正在写上一片」，
+    // 连着几次没进展就被当成传坏了。超时后交给下面那段「没传满」统一处理：已经落盘的前缀
+    // 不作废，把位置回给手机，它从那里接着发。
+    let mut written = 0u64;
+    let idle = Duration::from_secs(30);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1800);
+    loop {
+        let left = deadline
+            .checked_duration_since(tokio::time::Instant::now())
+            .unwrap_or_default();
+        if left.is_zero() {
+            break;
         }
-        Ok(Err(e)) => {
-            // 半截片：留着。报真实进度回去，手机从那里续传
-            drop(file);
-            let now = tokio::fs::metadata(&part)
-                .await
-                .map(|m| m.len())
-                .unwrap_or(0);
-            return (
-                StatusCode::OK,
-                Json(json!({"ok": false, "received": now,
-                            "error": format!("这一片断了（{e}），从 received 续传")})),
-            )
-                .into_response();
+        match tokio::time::timeout(idle.min(left), stream.as_mut().try_next()).await {
+            Err(_) => break,
+            Ok(Err(_)) => break,
+            Ok(Ok(None)) => break,
+            Ok(Ok(Some(chunk))) => {
+                if tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                written += chunk.len() as u64;
+                // 客户端把大小报小了：再多也不收，同样按「没传满」把位置回过去
+                if written > declared {
+                    break;
+                }
+            }
         }
-        Ok(Ok(n)) => n,
-    };
+    }
     drop(file);
     let now = tokio::fs::metadata(&part)
         .await

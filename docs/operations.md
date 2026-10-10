@@ -78,13 +78,17 @@ shows as one entry on the phone, labelled as the shared one.
    That leaves a file called `probe` in the opened folder — delete it afterwards. The quick tunnel
    has been measured on one machine at 1.5 MB/s one day and 10 KB/s the next, so a stalled upload
    is usually the tunnel, not postbox.
-2. Anything over 512 KB goes out as 512 KB pieces, one request each. A piece the PC did not
+2. Each file is one row with its own 暂停 / 继续 / 取消 / 重试, and the status line shows the byte
+   count the PC confirmed, not what the browser sent. 暂停 stops at the end of the current piece,
+   so 继续 picks up from an acknowledged offset. The bottom button stays disabled while a batch is
+   unfinished — that is deliberate: a second press used to restart the same file from zero.
+3. Anything over 512 KB goes out as 512 KB pieces, one request each. A piece the PC did not
    receive is re-sent from the offset the PC reports, so a big file is slow but still lands.
-3. The phone's progress bar counts bytes the browser handed over, not bytes the PC received. The
+4. The phone's progress bar counts bytes the browser handed over, not bytes the PC received. The
    line that decides whether it worked is the 已存到 … under each file.
-4. On the same Wi-Fi, skip the tunnel: `http://<pc-ip>:8712/upload`. Measured on the same
+5. On the same Wi-Fi, skip the tunnel: `http://<pc-ip>:8712/upload`. Measured on the same
    machine: 1 MB in 0.036 s over the LAN, 115 s over the tunnel.
-5. Half-finished files: chunk sessions live in `data/tmp/up-<id>.part` (swept after 24 h), and a
+6. Half-finished files: chunk sessions live in `data/tmp/up-<id>.part` (swept after 24 h), and a
    `.part` left inside the folder you chose is swept once it has been idle for 30 minutes.
 
 ## 3. Acceptance checklist

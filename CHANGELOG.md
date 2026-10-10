@@ -6,8 +6,28 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Each upload is a row you can drive.** The page used to have one 上传 button and nothing
+  else: press it twice and the same file starts over from zero, and while it was crawling you
+  could neither stop it nor tell a finished row from a stalled one. Every file now gets its own
+  暂停 / 继续 / 取消 / 重试, a status line that says how many bytes the PC has confirmed, and a
+  final 已存到 <路径>（<大小>）. The bottom button is disabled while a batch is still going and
+  says so (这一批正在传… / 这一批暂停中，先继续或取消那一条). 暂停 stops at the end of the current
+  512 KB piece rather than cutting it mid-write, so the next 继续 resumes from a position the PC
+  already acknowledged.
+
 ### Fixed
 
+- **A refused chunk request was unreadable to the browser.** The server answered 409 while the
+  phone was still sending the body, which makes Chrome throw the connection away and report a
+  plain network error — the `received` offset it had just computed never reached the client, so
+  继续 after a pause looked like four instant failures. Every early refusal now reads the request
+  body to the end before replying.
+- **A stalled piece used to lock its session for half an hour.** The server waited on a body that
+  had stopped arriving for up to 30 minutes, and while it waited the session was marked busy, so
+  anything the phone retried got 正在写上一片. A piece with no new bytes for 30 seconds now ends
+  there and reports what it actually has.
 - **Uploads gave up on a slow tunnel instead of working around it.** The client sent anything
   under 48 MB as one request, a threshold picked when this machine measured 1.5 MB/s on the
   quick tunnel. The next day it managed 10–17 KB/s: a 3 MB photo died at 133 s with Cloudflare's
