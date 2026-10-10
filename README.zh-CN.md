@@ -220,7 +220,7 @@ curl.exe -L -o tools\cloudflared.exe https://github.com/cloudflare/cloudflared/r
   Cloudflare 隧道、Tailscale 或反向代理），`base_url` 自己设——代码不关心域名从哪来。
 * 网页界面**和命令行输出**都是中文；参数名、配置键、注释和文档中英双语。加一层 locale 是
   很好的第一个贡献，见 [`CONTRIBUTING.md`](CONTRIBUTING.md)。
-* 76 个单元测试 + 三个系统跑 CI，但没有浏览器自动化：页面在真机上长什么样仍然靠人看，所以
+* 77 个单元测试 + 三个系统跑 CI，但没有浏览器自动化：页面在真机上长什么样仍然靠人看，所以
   运维文档里带了一份验收清单。
 
 ## 相关文档

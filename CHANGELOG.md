@@ -25,9 +25,14 @@ All notable changes to this project are documented here. The format follows
 
 - To the phone the upload whitelist and the share whitelist are one list: `d` counts the
   folders it may write to, upload-only ones first. The upload page labels which is which, and
-  each shared folder's own page links to it with the right number.
+  each shared folder's own page links to it with the right number. A folder opened both ways
+  takes one row, not two identically named radio buttons.
 - The `upload` and `share` subcommands share one implementation, so `add` / `list` / `rm`
   behave the same way on both.
+- Seven tests land in `serve.rs`, bringing the suite to 77: shared-folder resolution
+  (staying inside the opened folder, nesting without escaping), the per-segment percent
+  encoding of share URLs, media ids that follow a file as it changes, the pages never printing
+  the access key, and the merged write-target list.
 
 ### Fixed
 
@@ -96,11 +101,10 @@ re-publishing.
   a `.ts` source file is the more common thing an agent publishes here.
 - `/m/` (the images pulled out of a `.docx`) now goes through the same sender as the other
   file routes instead of carrying its own copy.
-- The test suite grows from 46 to 76 tests: range planning, container classification, the
-  media `Content-Type` overrides, page-level tests that publish a clip and read back the
-  rendered player, the upload whitelist (path traversal, index-out-of-range, missing key,
-  system-drive refusal, name collision), chunk planning, and shared-folder resolution
-  (escaping, dot entries, long-path prefixes, listing order).
+- The test suite grows from 46 to 64 tests: range planning, container classification, the
+  media `Content-Type` overrides, two page-level tests that publish a clip and read back the
+  rendered player, and the upload whitelist (path traversal, index-out-of-range, missing key,
+  system-drive refusal, name collision).
 
 ### Fixed
 

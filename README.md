@@ -245,7 +245,7 @@ What is by design, what to report privately, and how to harden further:
 * The web UI **and the CLI output** are Chinese; flags, config keys, comments and docs are
   bilingual. A locale layer is a good first contribution — see
   [`CONTRIBUTING.md`](CONTRIBUTING.md).
-* 76 unit tests and CI on three OSes, but no browser automation: what a page looks like on a
+* 77 unit tests and CI on three OSes, but no browser automation: what a page looks like on a
   real phone is still checked by hand, which is why the operations doc carries an acceptance
   checklist.
 

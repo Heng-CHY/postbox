@@ -1652,15 +1652,29 @@ struct UploadDest {
 
 /// 手机可以写入的所有目录：只进不出的上传目录，加上双向共享的目录。
 /// 页面上分组显示，接口上是一个合并后的序号，`d` 就按这个顺序数。
+/// 手机端能往里写的目录：先是 `upload add` 开的投递目录，再是 `share add` 开的共享目录。
+///
+/// 同一个文件夹被两样都开过时只列一次，并把那条标成共享目录。不合并的话，上传页的
+/// 单选列表里会出现两个一模一样的名字，谁也分不清该点哪个；而它的实际行为本来就是一回事。
 fn write_targets(cfg: &Config) -> Vec<(String, bool)> {
     let mut out: Vec<(String, bool)> = Vec::new();
     for d in &cfg.upload_dirs {
         out.push((d.clone(), false));
     }
     for d in &cfg.share_dirs {
-        out.push((d.clone(), true));
+        match out.iter_mut().find(|(e, _)| same_dir(e, d)) {
+            Some(hit) => hit.1 = true,
+            None => out.push((d.clone(), true)),
+        }
     }
     out
+}
+
+/// 判断两条白名单路径是不是同一个目录。Windows 上路径不区分大小写、`/` 与 `\` 通用、
+/// 末尾分隔符可有可无，所以先统一成同一种写法再比。
+fn same_dir(a: &str, b: &str) -> bool {
+    let norm = |s: &str| s.replace('/', "\\").trim_end_matches('\\').to_lowercase();
+    norm(a) == norm(b)
 }
 
 fn upload_target(
@@ -2587,7 +2601,7 @@ fn share_dir_html(cfg: &Config, i: usize, it: &ShareItem) -> String {
     };
     let up = write_targets(cfg)
         .iter()
-        .position(|(d, _)| d == &cfg.share_dirs[i])
+        .position(|(d, _)| same_dir(d, &cfg.share_dirs[i]))
         .map(|di| {
             format!(
                 "<p><a class=btn href=\"/upload?d={di}&sub={}\">传东西到这个文件夹</a></p>",
@@ -3210,6 +3224,22 @@ mod tests {
         assert_eq!(t.len(), 3);
         assert_eq!(t[0], ("D:/drop-a".to_string(), false));
         assert_eq!(t[2], ("D:/share-a".to_string(), true));
+        std::fs::remove_dir_all(&st.root).ok();
+    }
+
+    #[test]
+    fn a_folder_opened_both_ways_shows_up_once() {
+        let st = state("wt2");
+        // 生产上就会出现这种配置：投递目录顺手也开成共享目录，好让手机把传上来的翻回去
+        let cfg = Config {
+            upload_dirs: vec!["D:\\手机传上来\\".into()],
+            share_dirs: vec!["d:/手机传上来".into()],
+            ..st.cfg.clone()
+        };
+        let t = write_targets(&cfg);
+        assert_eq!(t.len(), 1, "同一个目录列了两次: {t:?}");
+        // 标成共享目录，上传页才会写「传进去的东西手机也能翻到」
+        assert!(t[0].1);
         std::fs::remove_dir_all(&st.root).ok();
     }
 
