@@ -40,6 +40,7 @@ Tick these off on a real phone:
 - [ ] Submitting one line in the **写反馈** box on a bundle page (`/b/<token>`) appends a line to `data/inbox/feedback.jsonl`, and `postbox inbox` shows it
 - [ ] The same note appears under "你在这个文件页提交过的意见" on that bundle page, and nowhere else
 - [ ] `/?key=<access key>` lists every live bundle; wrong or missing key gives the key-entry form, not the list
+- [ ] On that page 传到电脑上 and 共享目录 sit **above** the bundle list, and once more than 8 bundles pile up the rest fold behind 还有 N 个更早的 (`?all=1`) — the entries must never need a scroll to reach
 - [ ] "Download original" works per file; multi-file bundles produce a zip that actually unzips, with the original non-ASCII filenames intact
 - [ ] Images / PDF / audio / video preview in page; `.md` renders; `.docx` renders with its embedded images; `.xlsx` renders sheet by sheet
 - [ ] Video seeks: `curl -sD - -o /dev/null -H 'Range: bytes=0-1023' http://127.0.0.1:<port>/raw/<token>/<idx>` answers `206` with `content-range: bytes 0-1023/<size>`, and the page's player can be dragged to the middle of a clip without the whole file arriving first

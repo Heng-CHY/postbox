@@ -36,11 +36,11 @@ macOS, one binary, no installer, no Rust needed
 <td align="center"><sub>Markdown rendered as a readable page</sub></td>
 </tr>
 <tr>
-<td width="66%" colspan="2"><img src="docs/screenshots/home-desktop.png" alt="Home page on a desktop browser listing bundles and the feedback inbox"></td>
+<td width="66%" colspan="2"><img src="docs/screenshots/home-desktop.png" alt="Home page on a desktop browser: the upload and shared-folder entries on top, then the bundles"></td>
 <td width="34%"><img src="docs/screenshots/bundle-phone.png" alt="Bundle page on a phone with the file list and the feedback box"></td>
 </tr>
 <tr>
-<td colspan="2" align="center"><sub>Behind <code>/?key=…</code>: every live bundle, plus the notes the phone sent back</sub></td>
+<td colspan="2" align="center"><sub>Behind <code>/?key=…</code>: the two things you actually do from a phone sit on top; the bundle list (folded past 8) and the inbox follow</sub></td>
 <td align="center"><sub>A bundle page on the phone: files, whole-bundle zip, note box</sub></td>
 </tr>
 </table>
@@ -245,7 +245,7 @@ What is by design, what to report privately, and how to harden further:
 * The web UI **and the CLI output** are Chinese; flags, config keys, comments and docs are
   bilingual. A locale layer is a good first contribution — see
   [`CONTRIBUTING.md`](CONTRIBUTING.md).
-* 77 unit tests and CI on three OSes, but no browser automation: what a page looks like on a
+* 80 unit tests and CI on three OSes, but no browser automation: what a page looks like on a
   real phone is still checked by hand, which is why the operations doc carries an acceptance
   checklist.
 

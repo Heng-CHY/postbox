@@ -24,6 +24,9 @@ const FB_PER_MIN: u32 = 6;
 const TEXT_PREVIEW_MAX: u64 = 512 * 1024;
 /// Word / 表格页内解析上限
 const OFFICE_PREVIEW_MAX: u64 = 20 * 1024 * 1024;
+/// 首页「已发布」一屏先给多少条。包会一直攒着，全列出来就把真正要点的入口顶出屏幕了；
+/// 多出来的收在「还有 N 个更早的」后面，`?all=1` 展开。
+const HOME_RECENT: usize = 8;
 
 pub struct AppState {
     pub root: PathBuf,
@@ -333,6 +336,15 @@ header.top{display:flex;justify-content:space-between;align-items:center;gap:10p
 .updir span{min-width:0}
 .updir b{font-weight:600;word-break:break-all}
 .updir small{display:block;color:var(--muted);font-size:12.5px;margin-top:1px}
+.go{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:11px;margin:13px 0}
+.goitem{position:relative;display:block;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:13px 32px 14px 16px;color:var(--ink) !important}
+.goitem:hover,.goitem:active{text-decoration:none;border-color:var(--acc);background:#fffdf9}
+.goitem b{display:block;font-size:15.5px;font-weight:600;color:var(--head);letter-spacing:.1px}
+.goitem small{display:block;color:var(--muted);font-size:12.5px;line-height:1.55;margin-top:3px}
+.goitem::after{content:"›";position:absolute;right:14px;top:13px;color:var(--muted);font-size:19px;line-height:1}
+.goitem:hover::after{color:var(--acc-d)}
+.goitem .badge{margin-bottom:8px}
+.fold{margin:10px 0 0;font-size:13px}
 .bar{height:4px;background:var(--soft);border-radius:3px;overflow:hidden;margin:7px 0 3px}
 .bar>i{display:block;height:100%;width:0;background:var(--acc);transition:width .2s}
 ul.upl{list-style:none;margin:12px 0 0;padding:0}
@@ -395,23 +407,6 @@ fn home_body(
     // 不在每次打开首页时全目录扫描清理：那是同步遍历，手机刷新一下就得一遍。
     // 过期包由每小时的例行清理和发布时的清理兜住，读取单包时也各自校验有效期。
     let bundles = store::list_bundles(&st.root);
-    let mut rows = String::new();
-    if bundles.is_empty() {
-        rows = "<p class=muted>还没有已发布的文件。</p>".to_string();
-    }
-    for b in &bundles {
-        rows.push_str(&format!(
-            "<li><div><a href=\"/b/{}\"><b>{}</b></a><div class=muted>{} 个文件 · {}{}</div></div><a class=\"btn ghost\" href=\"/d/{}/0\">下载</a></li>",
-            esc(&b.token),
-            esc(&b.title),
-            b.files.len(),
-            store::fmt_time(b.created_ms),
-            b.expires_ms
-                .map(|e| format!(" · {} 过期", store::fmt_time(e)))
-                .unwrap_or_default(),
-            esc(&b.token)
-        ));
-    }
     let fbs = store::list_feedback(&st.root, 10);
     let mut fb_html = String::new();
     for f in fbs {
@@ -427,30 +422,82 @@ fn home_body(
         fb_html =
             "<p class=muted>还没有反馈。你在文件包页面底部写的意见都会汇总到这里。</p>".into();
     }
-    let share = if cfg.share_dirs.is_empty() {
-        String::new()
-    } else {
-        "<div class=card><h2>共享目录</h2><p class=hint>方向是 手机 ⇄ 电脑：电脑上开好的这几个文件夹，手机可以直接翻、直接下载，也能往里传。</p><a class=btn href=\"/s\">打开共享目录</a></div>".to_string()
-    };
-    let upload = if write_targets(&cfg).is_empty() {
-        String::new()
-    } else {
-        format!("<div class=card><h2>传到电脑上</h2><p class=hint>方向是 手机 → 电脑：选一个电脑上开好的目录，把手机里的照片、录音、文档推上去。单个文件 {} 以内。</p><a class=btn href=\"/upload\">打开上传页</a></div>", mb_label(cfg.upload_max_mb))
-    };
-    let body = format!(
-        "<header class=top><h1>文件寄递台</h1><span class=badge>共 {} 项</span></header>\
-<div class=card><h2>已发布</h2><p class=hint>方向是 电脑 → 手机：这些是推送到你手机上的文件包。</p><ul class=files>{rows}</ul></div>\
-{share}\
-{upload}\
-<div class=card><h2>手机回传的意见</h2><p class=hint>方向是 手机 → 电脑：你在文件包页面底部写的字会存回电脑的收件箱，只有我这边的 agent 读得到。</p>{fb_html}</div>",
-        bundles.len()
-    );
+    // `?all` 展开更早的包；`?all=0`（以及不带这个参数）都只看最近几条
+    let show_all = q.get("all").map(|v| v != "0").unwrap_or(false);
+    let body = home_html(&cfg, &bundles, &fb_html, show_all);
     let mut res = Html(page("文件寄递台", &body)).into_response();
     // 通过 ?key= 进来时把密钥记到 Cookie，这样文件页的返回按钮不必再带上明文密钥
     if q.contains_key("key") {
         set_key_cookie(&mut res, &cfg);
     }
     res
+}
+
+/// 首页的排布。**要做的事排在历史前面**：两个入口（传到电脑上 / 共享目录）是每天点的，
+/// 而文件包只会越攒越多 —— 让它们排在列表底下，手机上就得每次都划到底。
+/// 入口做成整卡可点，因为「卡片标题 + 一个小按钮」在窄屏上要点两回才知道能不能点。
+fn home_html(cfg: &Config, bundles: &[BundleMeta], fb_html: &str, show_all: bool) -> String {
+    let mut go = String::new();
+    if !write_targets(cfg).is_empty() {
+        go.push_str(&format!(
+            "<a class=goitem href=\"/upload\"><span class=badge>手机 → 电脑</span><b>传到电脑上</b><small>挑一个电脑上开好的目录，把手机里的照片、录音、文档推上去。单个文件 {} 以内。</small></a>",
+            mb_label(cfg.upload_max_mb)
+        ));
+    }
+    if !cfg.share_dirs.is_empty() {
+        go.push_str("<a class=goitem href=\"/s\"><span class=badge>手机 ⇄ 电脑</span><b>共享目录</b><small>电脑上开好的这几个文件夹：直接翻、直接下载，也能往里传。</small></a>");
+    }
+    let go = if go.is_empty() {
+        String::new()
+    } else {
+        format!("<div class=go>{go}</div>")
+    };
+
+    let mut rows = String::new();
+    if bundles.is_empty() {
+        rows = "<p class=muted>还没有已发布的文件。</p>".to_string();
+    }
+    // 折叠只在真的超出窗口时发生，否则 listed 就是全部
+    let folded = bundles.len() > HOME_RECENT && !show_all;
+    let listed = if folded {
+        &bundles[..HOME_RECENT]
+    } else {
+        bundles
+    };
+    for b in listed {
+        rows.push_str(&format!(
+            "<li><div><a href=\"/b/{}\"><b>{}</b></a><div class=muted>{} 个文件 · {}{}</div></div><a class=\"btn ghost\" href=\"/d/{}/0\">下载</a></li>",
+            esc(&b.token),
+            esc(&b.title),
+            b.files.len(),
+            store::fmt_time(b.created_ms),
+            b.expires_ms
+                .map(|e| format!(" · {} 过期", store::fmt_time(e)))
+                .unwrap_or_default(),
+            esc(&b.token)
+        ));
+    }
+    let fold = if folded {
+        format!(
+            "<p class=fold><a href=\"?all=1\">还有 {} 个更早的，全部展开</a></p>",
+            bundles.len() - HOME_RECENT
+        )
+    } else if show_all && bundles.len() > HOME_RECENT {
+        format!(
+            "<p class=fold><a href=\"/\">收起来，只留最近 {} 个</a></p>",
+            HOME_RECENT
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "<header class=top><h1>文件寄递台</h1><span class=badge>共 {} 项</span></header>\
+{}\
+<div class=card><h2>已发布</h2><p class=hint>方向是 电脑 → 手机：这些是推送到你手机上的文件包。</p><ul class=files>{rows}</ul>{fold}</div>\
+<div class=card><h2>手机回传的意见</h2><p class=hint>方向是 手机 → 电脑：你在文件包页面底部写的字会存回电脑的收件箱，只有我这边的 agent 读得到。</p>{fb_html}</div>",
+        bundles.len(),
+        go
+    )
 }
 
 /// 一条反馈的展示：正文 + 「谁给谁 · 关于哪个文件包 · 时间」。link=false 用于文件页内，包名不重复出现。
@@ -3303,6 +3350,74 @@ mod tests {
         assert!(html.contains("共享目录"), "没标出这是共享目录: {html}");
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&st.root).ok();
+    }
+
+    #[test]
+    fn home_puts_the_two_entries_above_the_history() {
+        // 用户报的就是这个：入口被几十个历史包顶到最底下，每次都要划到底才能点
+        let st = state("home");
+        let mut cfg = st.cfg.clone();
+        cfg.upload_dirs = vec!["D:/drop".into()];
+        cfg.share_dirs = vec!["D:/shelf".into()];
+        let bundles: Vec<BundleMeta> = (0..3).map(bundle).collect();
+        let html = home_html(&cfg, &bundles, "<p>fb</p>", false);
+        let up = html.find("href=\"/upload\"").expect("没有上传入口");
+        let sh = html.find("href=\"/s\"").expect("没有共享目录入口");
+        let first = html.find("/b/t0").expect("没有已发布列表");
+        assert!(
+            up < first && sh < first,
+            "入口排在历史后面: up={up} sh={sh} first={first}"
+        );
+        // 入口本身在历史那张卡之前，页面顺序是 入口 → 已发布 → 意见
+        assert!(
+            html.find("已发布").unwrap() < html.find("手机回传的意见").unwrap(),
+            "{html}"
+        );
+        assert!(!html.contains("SECRET-KEY-1234567890"), "{html}");
+        std::fs::remove_dir_all(&st.root).ok();
+    }
+
+    #[test]
+    fn home_folds_older_bundles_and_can_unfold() {
+        let st = state("homefold");
+        let cfg = st.cfg.clone();
+        let many: Vec<BundleMeta> = (0..HOME_RECENT + 4).map(bundle).collect();
+        let folded = home_html(&cfg, &many, "<p>fb</p>", false);
+        assert_eq!(
+            folded.matches("/b/t").count(),
+            HOME_RECENT,
+            "折叠时列多了: {folded}"
+        );
+        assert!(folded.contains("还有 4 个更早的"), "{folded}");
+        assert!(!folded.contains("/b/t11"), "折叠还露出了最老的那条");
+        assert_eq!(folded.matches("共 12 项").count(), 1, "徽标数应含全部");
+
+        let open = home_html(&cfg, &many, "<p>fb</p>", true);
+        assert_eq!(open.matches("/b/t").count(), HOME_RECENT + 4);
+        assert!(open.contains("收起来，只留最近"), "{open}");
+
+        // 没超过窗口时不该出现折叠文案，也不该有空的 <p>
+        let few = home_html(&cfg, &many[..3], "<p>fb</p>", false);
+        assert!(!few.contains("还有"), "{few}");
+        assert!(!few.contains("<p class=fold></p>"), "{few}");
+        std::fs::remove_dir_all(&st.root).ok();
+    }
+
+    /// 一条已发布的包，够首页渲染用就行
+    fn bundle(i: usize) -> BundleMeta {
+        BundleMeta {
+            token: format!("t{i}"),
+            title: format!("包 {i}"),
+            note: String::new(),
+            created_ms: 1_700_000_000_000 + i as i64,
+            expires_ms: None,
+            files: vec![store::FileEntry {
+                name: "a.txt".into(),
+                stored: "a.txt".into(),
+                size: 3,
+            }],
+            has_archive: false,
+        }
     }
 
     #[test]

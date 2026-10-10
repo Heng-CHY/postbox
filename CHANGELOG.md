@@ -23,16 +23,21 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **The home page leads with what you do from a phone.** 传到电脑上 and 共享目录 used to sit
+  under the whole bundle list, so once a month of publishing accumulated you had to scroll past
+  all of it to reach the two things you actually tap. They are now full-width tap targets in a
+  row above the list (two across on a desktop), and the list itself shows the 8 most recent
+  bundles with 还有 N 个更早的 behind `?all=1`.
 - To the phone the upload whitelist and the share whitelist are one list: `d` counts the
   folders it may write to, upload-only ones first. The upload page labels which is which, and
   each shared folder's own page links to it with the right number. A folder opened both ways
   takes one row, not two identically named radio buttons.
 - The `upload` and `share` subcommands share one implementation, so `add` / `list` / `rm`
   behave the same way on both.
-- Eight tests land in `serve.rs`, bringing the suite to 78: shared-folder resolution
+- Ten tests land in `serve.rs`, bringing the suite to 80: shared-folder resolution
   (staying inside the opened folder, nesting without escaping), the per-segment percent
   encoding of share URLs, media ids that follow a file as it changes, the pages never printing
-  the access key, and the merged write-target list.
+  the access key, the merged write-target list, and the home page's order and folding.
 
 ### Fixed
 

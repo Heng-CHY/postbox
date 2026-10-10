@@ -35,11 +35,11 @@ macOS，单个文件、免安装、不用装 Rust
 <td align="center"><sub>Markdown：排版成能读的页面</sub></td>
 </tr>
 <tr>
-<td width="66%" colspan="2"><img src="docs/screenshots/home-desktop.png" alt="电脑浏览器里的首页：文件包列表和手机回来的反馈"></td>
+<td width="66%" colspan="2"><img src="docs/screenshots/home-desktop.png" alt="电脑浏览器里的首页：最上面是传到电脑上和共享目录两个入口，下面是文件包列表"></td>
 <td width="34%"><img src="docs/screenshots/bundle-phone.png" alt="手机上的文件包页面：文件列表和写反馈的输入框"></td>
 </tr>
 <tr>
-<td colspan="2" align="center"><sub>用 <code>/?key=…</code> 打开：所有还没过期的文件包，加上手机回过的话</sub></td>
+<td colspan="2" align="center"><sub>用 <code>/?key=…</code> 打开：手机上来要做的两件事排在最前面，文件包列表（超过 8 个折起来）和反馈在后面</sub></td>
 <td align="center"><sub>手机上的文件包页：文件、整包 zip、反馈输入框</sub></td>
 </tr>
 </table>
@@ -220,7 +220,7 @@ curl.exe -L -o tools\cloudflared.exe https://github.com/cloudflare/cloudflared/r
   Cloudflare 隧道、Tailscale 或反向代理），`base_url` 自己设——代码不关心域名从哪来。
 * 网页界面**和命令行输出**都是中文；参数名、配置键、注释和文档中英双语。加一层 locale 是
   很好的第一个贡献，见 [`CONTRIBUTING.md`](CONTRIBUTING.md)。
-* 77 个单元测试 + 三个系统跑 CI，但没有浏览器自动化：页面在真机上长什么样仍然靠人看，所以
+* 80 个单元测试 + 三个系统跑 CI，但没有浏览器自动化：页面在真机上长什么样仍然靠人看，所以
   运维文档里带了一份验收清单。
 
 ## 相关文档
