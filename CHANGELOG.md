@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-10-10
+
+The phone now works directly on the folders the PC opens: look inside, pull files out,
+drop files in. The two entries it uses for that moved above the bundle list, so opening
+them no longer means scrolling past everything already published. A minor bump because
+`config.json` grew `share_dirs` and six routes appeared; nothing published before 0.3
+needs re-publishing.
+
 ### Added
 
 - **Shared folders.** `postbox share add D:\library` opens a folder in both directions: the
@@ -49,6 +57,8 @@ All notable changes to this project are documented here. The format follows
   cleaned now, which is also the form the containment check compares against.
 - `/sf`, `/sd`, `/sh` and `/sm` accepted only the cookie, so a page opened straight from a
   `?key=` link showed no video, no inlined report images and no docx pictures.
+
+## [0.3.0] — 2026-10-09
 
 Two directions instead of one: a phone can now push files back into folders the PC opens,
 and video served to a phone actually plays and seeks. A minor bump because `config.json`
