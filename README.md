@@ -255,7 +255,7 @@ What is by design, what to report privately, and how to harden further:
 
 * [Architecture & code map](docs/architecture.md) · [结构与代码](docs/architecture.zh-CN.md)
 * [Agent integration](docs/agent-integration.md) · [接入你的 agent](docs/agent-integration.zh-CN.md)
-* [Operations & acceptance checklist](docs/operations.md) — lifecycle table, uninstall, troubleshooting
+* [Operations & acceptance checklist](docs/operations.md) — which folder to hand to the phone, what to do when an upload crawls, lifecycle table, uninstall, troubleshooting
 * [运维与验收清单（简体中文）](docs/operations.zh-CN.md)
 * [SECURITY.md](SECURITY.md) — what to report privately, what is by design, how to harden
 * [CONTRIBUTING.md](CONTRIBUTING.md) — dev setup, the checks CI runs, rules for previews/UI/docs

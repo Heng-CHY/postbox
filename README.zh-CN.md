@@ -229,7 +229,7 @@ curl.exe -L -o tools\cloudflared.exe https://github.com/cloudflare/cloudflared/r
 
 * [结构与代码](docs/architecture.zh-CN.md) · [Architecture & code map](docs/architecture.md)
 * [接入你的 agent](docs/agent-integration.zh-CN.md) · [Agent integration](docs/agent-integration.md)
-* [运维与验收清单](docs/operations.zh-CN.md)——生命周期对照、卸载步骤、故障排查
+* [运维与验收清单](docs/operations.zh-CN.md)——把哪个目录交给手机、传得慢怎么查、生命周期对照、卸载步骤、故障排查
 * [Operations & acceptance checklist (English)](docs/operations.md)
 * [SECURITY.md](SECURITY.md)——什么该私下报、哪些是有意为之、怎么把部署加固（英文）
 * [CONTRIBUTING.md](CONTRIBUTING.md)——开发环境、CI 跑的检查、预览/界面/文档的规矩（英文）

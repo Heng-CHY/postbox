@@ -32,7 +32,62 @@ tunnel hostname it writes it into `base_url`, and the next time MCP reads the co
 gets the new address. If `up` is not running at all, publishing still succeeds — you just
 get a `http://127.0.0.1:<port>` link until the server comes back.
 
-## 2. Acceptance checklist
+## 2. Handing a folder to the phone
+
+The service stays running while you do this; a change takes effect on the phone's next page
+refresh, no restart.
+
+### Shared folder — phone ⇄ PC (browse, download, upload)
+
+```bash
+postbox share add D:\library   # open one; repeatable, up to 20
+postbox share list             # what is open, with the number each one is reached by
+postbox share rm 0             # take one back
+```
+
+- The phone sees them on the home page under 共享目录, or at `/s` directly. Inside one it can
+  browse, download, preview with the same renderer a published bundle uses (video seeks, `.docx`
+  keeps its images, tables scroll), and upload back into any subfolder.
+- The directory has to exist already and be an absolute path. Anything on the system drive is
+  refused, and `share add` tells you that is why.
+- Entries whose name starts with a dot are never listed and cannot be fetched, and no `..` gets
+  out of the opened folder.
+- Take a folder back while an upload is in flight and the last piece is refused — nothing lands.
+
+### Upload folder — phone → PC (write-only)
+
+```bash
+postbox upload add D:\somewhere
+postbox upload list
+postbox upload rm 0
+```
+
+Use this when the phone should only drop files in and never look inside. A folder opened both ways
+shows as one entry on the phone, labelled as the shared one.
+
+### When an upload is slow or fails
+
+1. Measure the tunnel before suspecting the tool:
+
+   ```bash
+   curl -X POST --data-binary @some-200kb-file \
+     "<base url>/api/upload?key=<access key>&d=0&n=probe" -o /dev/null \
+     -w "%{http_code} %{time_total}s %{speed_upload}B/s\n"
+   ```
+
+   That leaves a file called `probe` in the opened folder — delete it afterwards. The quick tunnel
+   has been measured on one machine at 1.5 MB/s one day and 10 KB/s the next, so a stalled upload
+   is usually the tunnel, not postbox.
+2. Anything over 512 KB goes out as 512 KB pieces, one request each. A piece the PC did not
+   receive is re-sent from the offset the PC reports, so a big file is slow but still lands.
+3. The phone's progress bar counts bytes the browser handed over, not bytes the PC received. The
+   line that decides whether it worked is the 已存到 … under each file.
+4. On the same Wi-Fi, skip the tunnel: `http://<pc-ip>:8712/upload`. Measured on the same
+   machine: 1 MB in 0.036 s over the LAN, 115 s over the tunnel.
+5. Half-finished files: chunk sessions live in `data/tmp/up-<id>.part` (swept after 24 h), and a
+   `.part` left inside the folder you chose is swept once it has been idle for 30 minutes.
+
+## 3. Acceptance checklist
 
 Tick these off on a real phone:
 
@@ -61,7 +116,7 @@ Tick these off on a real phone:
 - [ ] `curl -sD - -o /dev/null https://<host>/b/<token>` shows `content-security-policy`, `x-content-type-options: nosniff` and `referrer-policy`
 - [ ] The HTML of a bundle page or file page contains no trace of `access_key` (there is a unit test for this too)
 
-## 3. Lifecycle
+## 4. Lifecycle
 
 | Event | Effect | What you do |
 | --- | --- | --- |
@@ -74,10 +129,10 @@ Tick these off on a real phone:
 | You edit `access_key` / `ntfy_topic` | picked up without a restart | resubscribe the phone if the topic changed |
 | You `upload add` / `upload rm` / `share add` / `share rm` a folder, or edit `upload_max_mb` | picked up without a restart; an empty list removes the entry from the home page entirely | nothing |
 | You revoke a folder while an upload is in flight | the chunk session is refused at the last piece; nothing is written | re-open the page and send it again |
-| An upload is interrupted midway | the half-finished session lives in `data/tmp/up-<id>.part` and is swept after 24 h | just re-send the file; a new session starts clean |
+| An upload is interrupted midway | the half-finished session lives in `data/tmp/up-<id>.part` (swept after 24 h), and a `.part` left in the folder you chose is swept after 30 min | just re-send the file; a new session starts clean |
 | `data/config.json` lost | access key and topic are regenerated on next use | resubscribe the phone to the new topic; old bundle links still work (tokens live in `bundles/`) |
 
-## 4. Stop and uninstall
+## 5. Stop and uninstall
 
 Stop temporarily (config and data are kept). Stop **this project's** process by PID:
 
@@ -115,7 +170,7 @@ Full uninstall, in order:
 Nothing here installs a system service, a driver or an updater. Neither cloudflared nor
 ntfy needs an account. Deleting the directory is the whole uninstall.
 
-## 5. Troubleshooting
+## 6. Troubleshooting
 
 | Symptom | Check first | Fix |
 | --- | --- | --- |
@@ -137,7 +192,7 @@ ntfy needs an account. Deleting the directory is the whole uninstall.
 | Port already in use | `postbox config port get` | `postbox config port 8899`, then restart `up` |
 | Page looks broken on the phone | `postbox --version` and the commit you built from | re-take a screenshot, open an issue |
 
-## 6. What is on disk, and how much
+## 7. What is on disk, and how much
 
 * `data/bundles/<token>/files/` holds **copies** of everything you published, so the
   directory grows with what you send. Expiry is the reaper: 30 days by default, `--days 0`
@@ -149,7 +204,7 @@ ntfy needs an account. Deleting the directory is the whole uninstall.
 * `data/config.json` contains the access key. Treat the file like an SSH key: it is not
   committed, and it should not sit in a synced folder.
 
-## 7. Known gaps
+## 8. Known gaps
 
 No HTTPS on the local port (TLS ends at the tunnel); no per-bundle password; uploads are
 capped at 100 MB per file because that is Cloudflare's free-plan request-body limit; no access
