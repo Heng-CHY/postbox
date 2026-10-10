@@ -29,13 +29,17 @@ All notable changes to this project are documented here. The format follows
   takes one row, not two identically named radio buttons.
 - The `upload` and `share` subcommands share one implementation, so `add` / `list` / `rm`
   behave the same way on both.
-- Seven tests land in `serve.rs`, bringing the suite to 77: shared-folder resolution
+- Eight tests land in `serve.rs`, bringing the suite to 78: shared-folder resolution
   (staying inside the opened folder, nesting without escaping), the per-segment percent
   encoding of share URLs, media ids that follow a file as it changes, the pages never printing
   the access key, and the merged write-target list.
 
 ### Fixed
 
+- `/upload` asked the wrong list whether anything was open. It looked at `upload_dirs` while
+  the page itself, the picker and the API all use upload dirs *plus* share dirs, so a folder
+  opened only with `share add` — which is precisely what its own "传东西到这个文件夹" button
+  links to — answered 还没开放上传.
 - `share add`'s browse root used to print Windows' long-path prefix; the display path is
   cleaned now, which is also the form the containment check compares against.
 - `/sf`, `/sd`, `/sh` and `/sm` accepted only the cookie, so a page opened straight from a

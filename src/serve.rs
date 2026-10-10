@@ -1763,8 +1763,8 @@ async fn upload_page(
     if !key_matches(&cfg, &headers, &q) {
         return need_key();
     }
-    if cfg.upload_dirs.is_empty() {
-        let body = "<h1>还没开放上传</h1><p class=muted>电脑上运行 <code>postbox upload add D:\\某个目录</code> 开一个目录，手机这边就有线了。</p>";
+    if write_targets(&cfg).is_empty() {
+        let body = "<h1>还没开放上传</h1><p class=muted>电脑上运行 <code>postbox upload add D:\\某个目录</code> 或 <code>postbox share add D:\\某个目录</code> 开一个目录，手机这边就有线了。</p>";
         return (StatusCode::OK, Html(page("上传", body))).into_response();
     }
     let mut res = Html(page("传到电脑上", &upload_form_html(&cfg))).into_response();
@@ -3283,6 +3283,26 @@ mod tests {
         assert!(!valid_upload_id(&"a".repeat(65)));
         assert!(!valid_upload_id("deadbeef:stream"));
         assert!(!valid_upload_id("deadbeef\\stream"));
+    }
+
+    #[test]
+    fn a_share_dir_alone_is_enough_for_the_upload_page() {
+        // 只开共享目录、没开投递目录是正经用法：共享目录页上那颗「传东西到这个文件夹」
+        // 就是往 /upload 走的。以前那里看的是 upload_dirs，于是链接点进一个「还没开放」。
+        let st = state("upshare");
+        let dir = std::env::temp_dir().join(format!("postbox-upshare-{}", store::now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut cfg = st.cfg.clone();
+        cfg.upload_dirs = vec![];
+        cfg.share_dirs = vec![store::clean_abs(&std::fs::canonicalize(&dir).unwrap())
+            .display()
+            .to_string()];
+        assert!(!write_targets(&cfg).is_empty(), "共享目录得算写入目标");
+        let html = upload_form_html(&cfg);
+        assert!(html.contains("name=dir"), "上传页没给出可选项: {html}");
+        assert!(html.contains("共享目录"), "没标出这是共享目录: {html}");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&st.root).ok();
     }
 
     #[test]
