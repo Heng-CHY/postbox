@@ -86,8 +86,9 @@ shows as one entry on the phone, labelled as the shared one.
    receive is re-sent from the offset the PC reports, so a big file is slow but still lands.
 4. The phone's progress bar counts bytes the browser handed over, not bytes the PC received. The
    line that decides whether it worked is the 已存到 … under each file.
-5. On the same Wi-Fi, skip the tunnel: `http://<pc-ip>:8712/upload`. Measured on the same
-   machine: 1 MB in 0.036 s over the LAN, 115 s over the tunnel.
+5. On the same Wi-Fi, skip the tunnel. `postbox token` prints that exact address (and the
+   new-address push carries it too, since unlike the tunnel hostname it survives a restart).
+   Measured on the same machine: 1 MB in 0.036 s over the LAN, 115 s over the tunnel.
 6. Half-finished files: chunk sessions live in `data/tmp/up-<id>.part` (swept after 24 h), and a
    `.part` left inside the folder you chose is swept once it has been idle for 30 minutes.
 
@@ -110,6 +111,7 @@ Tick these off on a real phone:
 - [ ] `postbox share add D:\library`: `/s` lists the folder, `/s/<i>` browses it with directories first, dot-prefixed entries absent, and a file opens in the same preview as a bundle file (video seeks, docx images load)
 - [ ] Uploading from the share page into a subfolder of a shared folder lands there and shows up on refresh
 - [ ] `postbox logs` shows the tunnel-ready and push lines; after a restart the phone gets a "postbox 新地址" push within ~30 s — if it does not, `logs` says whether the push failed
+- [ ] That push carries both addresses: the new tunnel URL and the same-Wi-Fi `http://<pc-ip>:<port>/` link; `postbox token` prints the same two lines
 - [ ] Uploading the same name twice produces `名字 (1).ext` — nothing on the PC gets overwritten
 - [ ] `postbox upload add C:\anything` is refused with a sentence that says why; so is a folder that does not exist yet
 - [ ] Without the access key the upload page answers 401 and `POST /api/upload` answers 401

@@ -217,7 +217,8 @@ curl.exe -L -o tools\cloudflared.exe https://github.com/cloudflare/cloudflared/r
   实际收到的位置续传。
   `upload_max_mb`（默认 100，可设到 2048）是应用自己的闸门。隧道之外就没这回事：同一份代码
   内网直连测过 200 MB 用 4.0 秒、300 MB 用 4.8 秒，同一个 Wi-Fi
-  （`http://<电脑内网IP>:8712/upload`）或 Tailscale 仍然是快得多的那条路。
+  （`http://<电脑内网IP>:8712/upload`，`postbox token` 会连这条一起打印，重启后的「新地址」推送里也带着它）
+  或 Tailscale 仍然是快得多的那条路。
 * 免费快速隧道每次重启换域名，旧链接随之失效。要固定地址就把它挂到自己的域名下（命名
   Cloudflare 隧道、Tailscale 或反向代理），`base_url` 自己设——代码不关心域名从哪来。
 * 网页界面**和命令行输出**都是中文；参数名、配置键、注释和文档中英双语。加一层 locale 是

@@ -8,6 +8,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **The LAN address now travels with the push.** The new-address notification used to carry only
+  the tunnel URL, even though the same-Wi-Fi address is two orders of magnitude faster and does
+  *not* change on restart. `postbox token` prints it as a second line too, and both are skipped
+  when `bind` is loopback-only — an address the phone cannot reach is worse than none. The host is
+  picked by asking the operating system which interface the default route uses, so a machine with
+  WSL or a hotspot adapter present still gets its real Wi-Fi address.
 - **Each upload is a row you can drive.** The page used to have one 上传 button and nothing
   else: press it twice and the same file starts over from zero, and while it was crawling you
   could neither stop it nor tell a finished row from a stalled one. Every file now gets its own

@@ -161,13 +161,22 @@ fn supervise_once(
                 Ok(c) => {
                     println!("隧道就绪: {url}");
                     store::log_event(root, &format!("隧道就绪: {url}"));
+                    // 手机和电脑在同一个 Wi-Fi 时直连快两个数量级，而这个地址重启也不会变，
+                    // 所以跟着新地址一起推一次，省得每次都要人去命令行里翻
+                    let lan = match store::lan_url(&c) {
+                        Some(lan) => format!(
+                            "\n\n同一个 Wi-Fi 直连更快：\n{lan}?key={}\n（这个地址不随重启变）",
+                            c.access_key
+                        ),
+                        None => String::new(),
+                    };
                     notify::push(
                         &c,
                         root,
                         "postbox 新地址",
                         &format!(
-                            "隧道已就绪：\n{url}/?key={}\n(地址变化时会自动再推一次)",
-                            c.access_key
+                            "隧道已就绪：\n{url}/?key={}{}\n(地址变化时会自动再推一次)",
+                            c.access_key, lan
                         ),
                     );
                 }

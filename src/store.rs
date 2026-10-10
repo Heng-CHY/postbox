@@ -121,6 +121,35 @@ pub fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// 电脑在局域网里的地址。拿一个 UDP socket 「连」出去再问它自己是谁 —— 不会真的发包，
+/// 但系统会替它选出默认路由那张网卡，所以比遍历网卡列表更不容易挑到 WSL 或热点适配器。
+/// 手机和电脑在同一个 Wi-Fi 时用这个地址，比走公网隧道快两个数量级。
+pub fn lan_ip() -> Option<std::net::IpAddr> {
+    use std::net::IpAddr;
+    let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    s.connect(("8.8.8.8", 80)).ok()?;
+    let ip = s.local_addr().ok()?.ip();
+    match ip {
+        IpAddr::V4(v) if v.is_loopback() || v.is_unspecified() || v.is_link_local() => None,
+        IpAddr::V6(v) if v.is_loopback() || v.is_unspecified() => None,
+        ip => Some(ip),
+    }
+}
+
+/// 局域网直连用的完整地址，带首页密钥。挑不到网卡或 `bind` 只设了回环时不给（返回 None），
+/// 免得推一个手机根本连不上的地址过去。
+pub fn lan_url(cfg: &Config) -> Option<String> {
+    if cfg.bind == "127.0.0.1" || cfg.bind == "localhost" {
+        return None;
+    }
+    let ip = lan_ip()?;
+    let host = match ip {
+        std::net::IpAddr::V6(v) => format!("[{v}]"),
+        std::net::IpAddr::V4(v) => v.to_string(),
+    };
+    Some(format!("http://{}:{}/", host, cfg.port))
+}
+
 pub fn fmt_time(ms: i64) -> String {
     Local
         .timestamp_millis_opt(ms)
@@ -843,6 +872,37 @@ mod tests {
         ));
         std::fs::create_dir_all(&p).unwrap();
         p
+    }
+
+    fn cfg_with_bind(bind: &str) -> Config {
+        Config {
+            port: 8712,
+            access_key: "k".into(),
+            base_url: None,
+            tunnel: true,
+            ntfy_server: "https://ntfy.sh".into(),
+            ntfy_topic: "t".into(),
+            cloudflared: "tools/cloudflared.exe".into(),
+            bind: bind.into(),
+            upload_dirs: Vec::new(),
+            share_dirs: Vec::new(),
+            upload_max_mb: default_upload_max_mb(),
+        }
+    }
+
+    #[test]
+    fn lan_url_is_only_offered_when_it_is_reachable() {
+        // 只绑回环时给手机一个 127.0.0.1 是纯粹的误导，这条宁可不推
+        assert_eq!(lan_url(&cfg_with_bind("127.0.0.1")), None);
+        match lan_url(&cfg_with_bind("0.0.0.0")) {
+            Some(u) => {
+                assert!(u.starts_with("http://"), "{u}");
+                assert!(u.ends_with(":8712/"), "{u}");
+                assert_ne!(u, "http://127.0.0.1:8712/", "{u}");
+            }
+            // 没有局域网地址（比如 CI 机器）时也不该凭空造一个
+            None => assert!(lan_ip().is_none(), "有局域网地址却没推出来"),
+        }
     }
 
     #[test]

@@ -663,6 +663,10 @@ async fn main() -> Result<()> {
             if cfg.base_url.is_none() {
                 eprintln!("(还没有公网地址，运行 postbox up 会自动获取)");
             }
+            // 同一 Wi-Fi 下直连比走隧道快两个数量级，传大文件时用这条
+            if let Some(lan) = store::lan_url(&cfg) {
+                println!("同一个 Wi-Fi 直连: {lan}?key={}", cfg.access_key);
+            }
         }
     }
     Ok(())

@@ -239,7 +239,8 @@ What is by design, what to report privately, and how to harden further:
   so the tunnel's clock resets every time and a dropped piece is re-sent from where the PC
   actually got to.
   `upload_max_mb` (default 100, max 2048) is the app's own cap. Off Cloudflare the same build
-  took 200 MB in 4.0 s and 300 MB in 4.8 s — same Wi-Fi (`http://<pc-ip>:8712/upload`) or
+  took 200 MB in 4.0 s and 300 MB in 4.8 s — same Wi-Fi (`postbox token` prints the exact
+  `http://<pc-ip>:8712/upload`, and the new-address push carries it as well) or
   Tailscale is still the fast lane.
 * Free quick tunnels change hostname on every restart, so old links die. Need a stable URL?
   Put the server behind your own domain, a named Cloudflare tunnel or Tailscale and set
