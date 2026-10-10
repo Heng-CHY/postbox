@@ -44,12 +44,17 @@ agent   │  postbox mcp ──写入──▶ data/                │
 `upload_dirs` 里的某一条，子目录名和文件名都过 `sanitize_name`，所以恶意客户端能做到最坏的
 事也就是要一个不存在的目录。
 
+共享目录（`postbox share add`）是把这些能力从另一头用上：`/s/<序号>/<路径>` 浏览目录、并用文件包
+那套渲染预览文件，`/sf` 和 `/sd` 出字节（内联 / 下载），`/sh` 在沙箱里渲染共享的 `.html`，
+`/sm/<id>/<名>` 发共享 docx 抽出来的图片。这几条每一个都会先解析路径、canonicalize，再拒绝任何
+落到共享目录之外的结果。
+
 ## 代码放在哪
 
 ```
 src/main.rs     命令行入口（clap）、子命令分发
 src/store.rs    配置、文件包元数据、发布、过期清理、反馈与上传流水
-src/serve.rs    axum 路由、页面 HTML、CSS、Markdown 渲染、各类预览、分段发送与上传接口
+src/serve.rs    axum 路由、页面 HTML、CSS、Markdown 渲染、各类预览、分段发送、上传与共享目录浏览
 src/office.rs   .docx → HTML（zip + quick-xml）、.xlsx/.xls/.ods → HTML（calamine）
 src/tunnel.rs   拉起 cloudflared、失败时退避重启、解析域名回写 base_url、把链接推给手机
 src/notify.rs   通过系统 curl 推 ntfy

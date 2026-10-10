@@ -10,7 +10,7 @@ how to stop and remove it. Installation, config reference and agent setup live i
 
 | Part | Binary | Lifetime | Job |
 | --- | --- | --- | --- |
-| Web server | `postbox up` | long-running (hidden, starts on login once autostart is installed) | stores files, renders phone pages, receives feedback, takes uploads into the folders you opened, sweeps expired bundles |
+| Web server | `postbox up` | long-running (hidden, starts on login once autostart is installed) | stores files, renders phone pages, receives feedback, takes uploads into the folders you opened, serves shared folders both ways, sweeps expired bundles |
 | Public tunnel | `tools/cloudflared.exe` | child process of the web server, restarted by it with backoff | opens an outward door, hands out an `xxx.trycloudflare.com` hostname |
 | Push | ntfy.sh (a public server, not on your machine) | stateless, called through the system `curl` | buzzes your phone when something new is published |
 | MCP server | `postbox mcp` | spawned by your agent client, dies with it | lets the agent drive the three things above through tool calls |
@@ -47,6 +47,9 @@ Tick these off on a real phone:
 - [ ] Wide tables scroll horizontally on a phone instead of collapsing to one character per column
 - [ ] Forwarding the link to someone else works with no account on their side (that is the delivery capability)
 - [ ] `postbox upload add D:\somewhere` then the phone page `/upload`: one small file lands in that folder (or in the subfolder you typed), and `postbox uploads` lists it
+- [ ] `postbox share add D:\library`: `/s` lists the folder, `/s/<i>` browses it with directories first, dot-prefixed entries absent, and a file opens in the same preview as a bundle file (video seeks, docx images load)
+- [ ] Uploading from the share page into a subfolder of a shared folder lands there and shows up on refresh
+- [ ] `postbox logs` shows the tunnel-ready and push lines; after a restart the phone gets a "postbox 新地址" push within ~30 s — if it does not, `logs` says whether the push failed
 - [ ] Uploading the same name twice produces `名字 (1).ext` — nothing on the PC gets overwritten
 - [ ] `postbox upload add C:\anything` is refused with a sentence that says why; so is a folder that does not exist yet
 - [ ] Without the access key the upload page answers 401 and `POST /api/upload` answers 401
@@ -68,7 +71,8 @@ Tick these off on a real phone:
 | `up` dies | pages unreachable; MCP keeps publishing into `data/` happily | run `postbox up` again, or wait for the login item |
 | You edit `port` / `bind` / `tunnel` | the running server keeps the old values | restart `postbox up` |
 | You edit `access_key` / `ntfy_topic` | picked up without a restart | resubscribe the phone if the topic changed |
-| You `upload add` / `upload rm` a folder, or edit `upload_max_mb` | picked up without a restart; an empty list removes the entry from the home page entirely | nothing |
+| You `upload add` / `upload rm` / `share add` / `share rm` a folder, or edit `upload_max_mb` | picked up without a restart; an empty list removes the entry from the home page entirely | nothing |
+| You revoke a folder while an upload is in flight | the chunk session is refused at the last piece; nothing is written | re-open the page and send it again |
 | An upload is interrupted midway | the half-finished session lives in `data/tmp/up-<id>.part` and is swept after 24 h | just re-send the file; a new session starts clean |
 | `data/config.json` lost | access key and topic are regenerated on next use | resubscribe the phone to the new topic; old bundle links still work (tokens live in `bundles/`) |
 
@@ -123,6 +127,9 @@ ntfy needs an account. Deleting the directory is the whole uninstall.
 | Upload page lists no folders | `upload_dirs` is empty | `postbox upload add D:\某个目录` |
 | Upload dies near 150–170 s with a 502/524 from Cloudflare | the tunnel's request timeout, not `upload_max_mb`. Files over 48 MB are chunked precisely to dodge this, so a whole-file failure means the chunk path is not being used | check `postbox --version` against current `master`; use the LAN / Tailscale for very big files |
 | Upload says the folder does not exist | someone renamed or deleted it on the PC | `postbox upload list` flags it; re-add or remove the entry |
+| Shared folder answers 401 | `/s`, `/sf`, `/sd`, `/sh`, `/sm` all need the key, and the browser must have it as a cookie or in the URL | open `/?key=…` once, or add `?key=…` to the link |
+| A file you expected in a shared listing is missing | its name starts with a dot, or the listing passed 500 entries | by design; rename it or browse deeper |
+| No "new address" push on the phone after a restart | `postbox logs` shows whether the push failed and why (curl missing, topic empty, ntfy refused) | fix the cause; `postbox notify-test` re-tests the path |
 | Word text renders but images are missing | images live in `data/tmp/m-<token>-<idx>/`, deleted when the bundle expires | re-publish the document |
 | `cargo build` fails with "access denied" (os error 5) | the exe is locked by the running service or an MCP process | kill it first, or build with `--target-dir` |
 | Forgot the home page URL or key | `postbox token` | prints `<base_url>/?key=<access_key>` |

@@ -62,6 +62,13 @@ threat model. Reading it before filing an issue saves everyone time.
   written anyway.
   Revoke the folders with `postbox upload rm` when you are done; `upload list` shows what is
   currently open. Raising the cap raises how much disk a key-holder can consume.
+* **A shared folder (`postbox share add`) is a directory listing of your disk** for anyone
+  holding `access_key`: names, sizes, timestamps and — on demand — the contents of every
+  file under it, previewed by the same renderer as bundles. Dot-prefixed entries are never
+  listed and cannot be fetched, and each request resolves the path and checks it is still
+  inside the opened folder, so a `..` or a link left inside it does not walk out. There is no
+  second factor and no per-folder key: opening a folder is the whole grant, so open a folder
+  you would hand a copy of to someone you trust, not your user profile.
 * **Preview pages run your document's content.** Markdown is rendered with raw HTML
   disabled and `javascript:` / `vbscript:` / `data:text/html` links neutralised,
   `.docx` is parsed into a controlled subset, and every response carries a

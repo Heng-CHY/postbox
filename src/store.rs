@@ -57,6 +57,10 @@ pub struct Config {
     /// 空列表等于这个功能没开：首页不显示入口，接口也没有可选目标。
     #[serde(default)]
     pub upload_dirs: Vec<String>,
+    /// 双向共享的目录：手机既能浏览下载，也能往里上传。规则与 `upload_dirs` 一样
+    /// （必须已存在、绝对路径、不在系统盘），区别只在「允许列目录和读文件」。
+    #[serde(default)]
+    pub share_dirs: Vec<String>,
     /// 单个上传文件的上限（MB）。走免费隧道时超过 100 会被 Cloudflare 挡在外面，
     /// 但内网直连或 Tailscale 场景下这个数由你自己定。
     #[serde(default = "default_upload_max_mb")]
@@ -270,6 +274,79 @@ pub struct UploadRecord {
     pub ip: String,
 }
 
+/// 服务侧的事件流水：隧道就绪、推送失败、上传落点。
+/// `postbox up` 是被 wscript 隐藏拉起来的，stdout 没人看得见 —— 没有这个文件，
+/// 「手机为什么没收到推送」就只能靠猜。
+pub fn log_event(root: &Path, msg: &str) {
+    let line = format!(
+        "[{}] {}
+",
+        fmt_time(now_ms()),
+        msg
+    );
+    if let Err(e) = (|| -> Result<()> {
+        std::fs::create_dir_all(root.join("inbox"))?;
+        let path = root.join("inbox").join("events.log");
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?;
+        f.write_all(line.as_bytes())?;
+        drop(f);
+        rotate_lines(&path, 256 * 1024, 128 * 1024);
+        Ok(())
+    })() {
+        eprintln!("写事件日志失败: {e}");
+    }
+}
+
+pub fn read_events(root: &Path, limit: usize) -> Vec<String> {
+    let text = std::fs::read_to_string(root.join("inbox").join("events.log")).unwrap_or_default();
+    let mut lines: Vec<String> = text.lines().map(|s| s.to_string()).collect();
+    if lines.len() > limit {
+        lines = lines.split_off(lines.len() - limit);
+    }
+    lines
+}
+
+/// 按字节从最新往回裁，保留 keep 以内的尾部
+fn rotate_lines(path: &Path, trigger: u64, keep: u64) {
+    let Ok(len) = path.metadata().map(|m| m.len()) else {
+        return;
+    };
+    if len < trigger {
+        return;
+    }
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let mut kept: Vec<&str> = Vec::new();
+    let mut total = 0u64;
+    for line in text.lines().rev() {
+        total += line.len() as u64 + 1;
+        if total > keep {
+            break;
+        }
+        kept.push(line);
+    }
+    if kept.is_empty() {
+        return;
+    }
+    kept.reverse();
+    let body = kept.join(
+        "
+",
+    );
+    let _ = write_atomic(
+        path,
+        format!(
+            "{body}
+"
+        )
+        .as_bytes(),
+    );
+}
+
 pub fn uploads_file(root: &Path) -> PathBuf {
     root.join("inbox").join("uploads.jsonl")
 }
@@ -369,6 +446,7 @@ pub fn init_root(root: &Path) -> Result<Config> {
         cloudflared: "tools/cloudflared.exe".into(),
         bind: default_bind(),
         upload_dirs: Vec::new(),
+        share_dirs: Vec::new(),
         upload_max_mb: default_upload_max_mb(),
     };
     write_atomic(&cfg_path, serde_json::to_string_pretty(&cfg)?.as_bytes())?;

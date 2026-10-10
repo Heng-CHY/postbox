@@ -62,6 +62,7 @@ folder and the phone can send files the other way too.
 | **Download / forward** | correct UTF-8 filenames; the link works for anyone, no account, no app |
 | **Feedback** | a note box on the page, appended to `data/inbox/feedback.jsonl` |
 | **Upload** | the other direction: open a folder with `postbox upload add D:\somewhere` and the phone can push files into it, into a subfolder you name on the spot. Anything over 48 MB is sliced into chunks and resumed piece by piece |
+| **Share** | `postbox share add D:\library` opens a folder both ways: the phone browses it, previews and downloads anything in it with the same renderer as bundles, and uploads back into any subfolder |
 | **Expiry** | bundles self-delete (30 days by default, `--days 0` to keep forever) |
 | **Agent control** | an MCP stdio server with 5 tools; hardening covered in [SECURITY.md](SECURITY.md) |
 
@@ -128,6 +129,7 @@ Everything lives in `data/config.json`. Read or set a value with
 | `ntfy_topic` | random UUID | the topic your phone subscribes to; empty disables pushes |
 | `cloudflared` | `tools/cloudflared.exe` | path to the tunnel binary, relative to the working dir or absolute |
 | `upload_dirs` | *(empty)* | folders the phone may upload into; managed with `postbox upload`, not by hand |
+| `share_dirs` | *(empty)* | folders the phone may also browse and download from; managed with `postbox share` |
 | `upload_max_mb` | `100` | per-file upload cap. Raising it only pays off off-tunnel: Cloudflare's free plan refuses request bodies over 100 MB whatever the app says |
 
 * `base_url none` clears a stale hostname; `tunnel false` is for a LAN-only setup (then use
@@ -155,6 +157,7 @@ Everything lives in `data/config.json`. Read or set a value with
 | `publish <files…> [--title T] [--note N] [--days 30]` | publish one or more files, print the link, push it |
 | `inbox [-n 20]` | show feedback submitted from the phone |
 | `upload add <dir>` / `upload list` / `upload rm <index\|path>` | open, list or revoke an upload target |
+| `share add <dir>` / `share list` / `share rm <index\|path>` | same, for folders the phone may also browse |
 | `uploads [-n 20]` | show what the phone has sent in (metadata only — files land where you pointed them) |
 | `token` | print the full home page URL, `https://…/?key=<access key>` |
 | `config <key> <value\|get>` | read or write one config field |
@@ -198,6 +201,10 @@ a 404: **[docs/agent-integration.md](docs/agent-integration.md)**.
   are sanitized, an existing file is never overwritten, the body streams to disk under a
   100 MB cap, and the whole route requires `access_key`. Which still means: whoever holds the
   key can write into the folders you opened — `postbox upload rm` them when you are done.
+* **A shared folder is a directory listing of your disk**, visible to anyone with the key:
+  every file name, size and timestamp below it, and every file's contents on demand. Entries
+  whose name starts with a dot never appear and cannot be fetched, and a path that resolves
+  outside the opened folder (through `..` or a link someone left there) is refused.
 * **Nothing is stored on a third party.** Files stay on your disk; only bytes the phone
   actually requested cross the tunnel, and ntfy carries the link text alone.
 * Untrusted documents are parsed, not trusted: CSP + `nosniff` on every response, raw HTML
@@ -238,7 +245,7 @@ What is by design, what to report privately, and how to harden further:
 * The web UI **and the CLI output** are Chinese; flags, config keys, comments and docs are
   bilingual. A locale layer is a good first contribution — see
   [`CONTRIBUTING.md`](CONTRIBUTING.md).
-* 64 unit tests and CI on three OSes, but no browser automation: what a page looks like on a
+* 76 unit tests and CI on three OSes, but no browser automation: what a page looks like on a
   real phone is still checked by hand, which is why the operations doc carries an acceptance
   checklist.
 

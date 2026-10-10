@@ -59,6 +59,7 @@ macOS，单个文件、免安装、不用装 Rust
 | **下载 / 转发** | 文件名 UTF-8 正确；链接谁拿到都能打开，不用注册、不用装 App |
 | **反馈** | 页面底部一个输入框，内容追加进 `data/inbox/feedback.jsonl` |
 | **上传** | 反过来的方向：`postbox upload add D:\某个目录` 开一个目录，手机就能把文件推上去，还能现场指定一个小文件夹。超过 48 MB 自动切片逐段传，断了只重传那一段 |
+| **共享** | `postbox share add D\library` 开一个双向目录：手机可以翻、可以预览下载（用的就是文件包那套渲染），也可以往任意子目录里传 |
 | **过期** | 文件包到期自动删除（默认 30 天，`--days 0` 永久保留） |
 | **agent 控制** | MCP stdio server，5 个工具；加固细节见 [SECURITY.md](SECURITY.md) |
 
@@ -121,6 +122,7 @@ curl.exe -L -o tools\cloudflared.exe https://github.com/cloudflare/cloudflared/r
 | `ntfy_topic` | 随机 UUID | 手机订阅的主题；留空即关闭推送 |
 | `cloudflared` | `tools/cloudflared.exe` | 隧道程序路径，相对工作目录或绝对路径 |
 | `upload_dirs` | 空 | 手机可以上传进落的目录；用 `postbox upload` 管理，不建议手改 |
+| `share_dirs` | 空 | 手机除了上传还能浏览下载的目录；用 `postbox share` 管理 |
 | `upload_max_mb` | `100` | 单个上传文件的上限。调大只在隧道之外有意义：Cloudflare 免费计划对请求体就卡 100 MB，应用说多少都没用 |
 
 * `base_url none` 清掉过期域名；只在内网用就设 `tunnel false`，手机直接访问
@@ -145,6 +147,7 @@ curl.exe -L -o tools\cloudflared.exe https://github.com/cloudflare/cloudflared/r
 | `publish <文件…> [--title 标题] [--note 说明] [--days 30]` | 发布一个或多个文件，打印并推送链接 |
 | `inbox [-n 20]` | 查看手机提交的反馈 |
 | `upload add <目录>` / `upload list` / `upload rm <序号\|路径>` | 开放、查看、收回手机可上传的目录 |
+| `share add <目录>` / `share list` / `share rm <序号\|路径>` | 同上，管的是手机还能浏览的目录 |
 | `uploads [-n 20]` | 查看手机传进来过什么（只有流水，文件落在你指定的目录里） |
 | `token` | 打印完整的首页地址：`https://…/?key=<访问密钥>` |
 | `config <键> <值\|get>` | 读或写单个配置项 |
@@ -183,6 +186,9 @@ curl.exe -L -o tools\cloudflared.exe https://github.com/cloudflare/cloudflared/r
   序号选，报不进任何路径。文件名一律 sanitize，同名不覆盖，请求体流式落盘并卡在 100 MB，
   整条路由都要 `access_key`。但话说回来：**知道密钥的人就能往你开的那些目录里写东西**，
   用完 `postbox upload rm` 收回。
+* **共享目录等于把你磁盘上的一块摊开给拿得到密钥的人看**：下面每个文件的名字、大小、时间
+  都在列表里，内容点开就能取。以点开头的条目（`.ssh`、`.env` 这类）既不显示也取不到；
+  解析后跑到共享目录外面的路径（`..`，或者谁在里面留了个链接）一律拒绝。
 * **不往第三方上传任何东西。** 文件留在你磁盘上，只有手机真正请求的字节才穿过隧道；ntfy
   只携带链接文字。
 * 不可信文档是拆开来看、不是照单全收：每个响应带 CSP 和 `nosniff`，Markdown 里的原始 HTML
@@ -214,7 +220,7 @@ curl.exe -L -o tools\cloudflared.exe https://github.com/cloudflare/cloudflared/r
   Cloudflare 隧道、Tailscale 或反向代理），`base_url` 自己设——代码不关心域名从哪来。
 * 网页界面**和命令行输出**都是中文；参数名、配置键、注释和文档中英双语。加一层 locale 是
   很好的第一个贡献，见 [`CONTRIBUTING.md`](CONTRIBUTING.md)。
-* 64 个单元测试 + 三个系统跑 CI，但没有浏览器自动化：页面在真机上长什么样仍然靠人看，所以
+* 76 个单元测试 + 三个系统跑 CI，但没有浏览器自动化：页面在真机上长什么样仍然靠人看，所以
   运维文档里带了一份验收清单。
 
 ## 相关文档

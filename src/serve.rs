@@ -98,8 +98,17 @@ impl AppState {
 fn csp_for(path: &str) -> &'static str {
     if path.starts_with("/h/") {
         "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:"
-    } else if path.starts_with("/raw/") || path.starts_with("/m/") {
+    } else if path.starts_with("/raw/")
+        || path.starts_with("/m/")
+        || path.starts_with("/sf/")
+        || path.starts_with("/sd/")
+        || path.starts_with("/sm/")
+    {
+        // 直接吐出用户文件原件的几条：/sf /sd 是共享目录里的文件，/sm 是从 docx 抽出来的图片。
+        // 都按最严的一档投送；被 <img>/<video> 引用时这些头不影响显示。
         "sandbox; default-src 'none'"
+    } else if path.starts_with("/sh/") {
+        "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:"
     } else {
         // connect-src 'self' 是给页内那两个 JS 用的：提交反馈和手机上传都要往
         // 同源发请求。少了这一行它会回落到 default-src 'none'，按钮点了没反应
@@ -112,7 +121,13 @@ async fn security_headers(req: Request, next: Next) -> Response {
     let path = req.uri().path();
     // 只有本站自己的页面允许被自己内嵌（PDF 和 HTML 预览走 iframe）；
     // 直接吐文件内容的路由不加 SAMEORIGIN，它们本来就在沙箱源里。
-    let untrusted = path.starts_with("/raw/") || path.starts_with("/m/") || path.starts_with("/h/");
+    let untrusted = path.starts_with("/raw/")
+        || path.starts_with("/m/")
+        || path.starts_with("/h/")
+        || path.starts_with("/sf/")
+        || path.starts_with("/sd/")
+        || path.starts_with("/sh/")
+        || path.starts_with("/sm/");
     let csp = csp_for(path);
     let mut res = next.run(req).await;
     // 首页正文里带着所有文件包的 token，/b/ 和 /f/ 也一样。缓存下来的话，
@@ -412,7 +427,12 @@ fn home_body(
         fb_html =
             "<p class=muted>还没有反馈。你在文件包页面底部写的意见都会汇总到这里。</p>".into();
     }
-    let upload = if cfg.upload_dirs.is_empty() {
+    let share = if cfg.share_dirs.is_empty() {
+        String::new()
+    } else {
+        "<div class=card><h2>共享目录</h2><p class=hint>方向是 手机 ⇄ 电脑：电脑上开好的这几个文件夹，手机可以直接翻、直接下载，也能往里传。</p><a class=btn href=\"/s\">打开共享目录</a></div>".to_string()
+    };
+    let upload = if write_targets(&cfg).is_empty() {
         String::new()
     } else {
         format!("<div class=card><h2>传到电脑上</h2><p class=hint>方向是 手机 → 电脑：选一个电脑上开好的目录，把手机里的照片、录音、文档推上去。单个文件 {} 以内。</p><a class=btn href=\"/upload\">打开上传页</a></div>", mb_label(cfg.upload_max_mb))
@@ -420,6 +440,7 @@ fn home_body(
     let body = format!(
         "<header class=top><h1>文件寄递台</h1><span class=badge>共 {} 项</span></header>\
 <div class=card><h2>已发布</h2><p class=hint>方向是 电脑 → 手机：这些是推送到你手机上的文件包。</p><ul class=files>{rows}</ul></div>\
+{share}\
 {upload}\
 <div class=card><h2>手机回传的意见</h2><p class=hint>方向是 手机 → 电脑：你在文件包页面底部写的字会存回电脑的收件箱，只有我这边的 agent 读得到。</p>{fb_html}</div>",
         bundles.len()
@@ -1072,8 +1093,24 @@ fn preview_body(st: &Arc<AppState>, token: &str, idx: usize) -> Response {
     }
 }
 
-/// 预览页正文。`None` 表示这一页干脆不渲染（文件不见了 / 包已过期），
-/// 调用方发一个 404 页回去。
+/// 一个待预览的文件。文件包里的一份、或共享目录里的一份，都先归到这个形状，
+/// 于是那套预览代码只用写一遍。
+struct Previewable {
+    name: String,
+    path: std::path::PathBuf,
+    size: u64,
+    /// 内联取这个文件的地址（支持 Range）
+    raw_url: String,
+    /// 下载原文件的地址
+    dl_url: String,
+    /// 上传的 .html 在沙箱里渲染的地址；没有就不给 iframe
+    frame_url: String,
+    /// docx 里抽出来的图片落在哪、用什么地址访问
+    media_dir: std::path::PathBuf,
+    media_url: String,
+}
+
+/// 预览页正文。`None` 表示这一页干脆不渲染（文件不见了 / 包已过期）。
 fn preview_html(st: &Arc<AppState>, token: &str, idx: usize) -> Option<(String, String)> {
     let meta = match store::load_meta(&st.root, token) {
         Ok(m) => m,
@@ -1083,14 +1120,36 @@ fn preview_html(st: &Arc<AppState>, token: &str, idx: usize) -> Option<(String, 
     let raw_url = format!("/raw/{token}/{idx}");
     let dl_url = format!("/d/{token}/{idx}");
     let back = format!("<header class=top><a class=back href=\"/b/{}\">← 返回文件列表</a><a class=btn href=\"{}\">下载原文件</a></header>", esc(&meta.token), dl_url);
-    let kind = classify(&f.name);
-    let fpath = st
-        .root
-        .join("bundles")
-        .join(token)
-        .join("files")
-        .join(&f.stored);
-    let head = format!("<p class=eyebrow>{}</p>", esc(&f.name));
+    let p = Previewable {
+        name: f.name.clone(),
+        path: st
+            .root
+            .join("bundles")
+            .join(token)
+            .join("files")
+            .join(&f.stored),
+        size: f.size,
+        raw_url,
+        dl_url,
+        frame_url: format!("/h/{token}/{idx}"),
+        media_dir: st.root.join("tmp").join(format!("m-{token}-{idx}")),
+        media_url: format!("/m/{token}/{idx}"),
+    };
+    let inner = render_preview(&p)?;
+    let body = format!(
+        "{back}<div class=card>{inner}<p class=muted>{} · {}</p></div>{toast}",
+        store::human_size(p.size),
+        esc(&store::fmt_time(meta.created_ms)),
+        toast = toast_js()
+    );
+    Some((p.name.clone(), body))
+}
+
+fn render_preview(p: &Previewable) -> Option<String> {
+    let fpath = &p.path;
+    let raw_url = &p.raw_url;
+    let kind = classify(&p.name);
+    let head = format!("<p class=eyebrow>{}</p>", esc(&p.name));
     let inner = match kind {
         Kind::Image => format!("{head}<img class=preview src=\"{raw_url}\">"),
         Kind::Pdf => format!(
@@ -1099,17 +1158,17 @@ fn preview_html(st: &Arc<AppState>, token: &str, idx: usize) -> Option<(String, 
         ),
         Kind::Audio | Kind::Video => {
             let tag = if kind == Kind::Video { "video" } else { "audio" };
-            media_html(&head, tag, &raw_url, &fpath, &f.name, f.size)
+            media_html(&head, tag, raw_url, fpath, &p.name, p.size)
         }
         Kind::Markdown | Kind::Code | Kind::Text | Kind::Diff => {
             // 先看大小再决定读不读，避免为了判断而把大文件整个吞进内存
-            if f.size > TEXT_PREVIEW_MAX {
+            if p.size > TEXT_PREVIEW_MAX {
                 format!(
                     "{head}<p class=muted>文件较大（{}），页内只适合下载后查看。</p>",
-                    store::human_size(f.size)
+                    store::human_size(p.size)
                 )
             } else {
-                let Ok(bytes) = std::fs::read(&fpath) else {
+                let Ok(bytes) = std::fs::read(fpath) else {
                     return None;
                 };
                 let text = String::from_utf8_lossy(&bytes);
@@ -1124,25 +1183,25 @@ fn preview_html(st: &Arc<AppState>, token: &str, idx: usize) -> Option<(String, 
             }
         }
         Kind::Docx => {
-            if f.size > OFFICE_PREVIEW_MAX {
+            if p.size > OFFICE_PREVIEW_MAX {
                 format!(
                     "{head}<p class=muted>文档较大（{}），建议下载后用手机上的 Office 或 WPS 打开。</p>",
-                    store::human_size(f.size)
+                    store::human_size(p.size)
                 )
             } else {
-                let media_dir = st.root.join("tmp").join(format!("m-{token}-{idx}"));
-                let media_url = format!("/m/{token}/{idx}");
+                let media_dir = &p.media_dir;
+                let media_url = &p.media_url;
                 // 包里的文件发布后就不变了，所以解析结果可以留着：否则每开一次预览页
                 // 都要把整份 docx 重新解压、重新抽一遍图。缓存的是最终 HTML 片段。
                 let cache = media_dir.join(".rendered.html");
                 if let Ok(cached) = std::fs::read_to_string(&cache) {
                     cached
                 } else {
-                    match crate::office::docx_to_html(&fpath, Some((&media_dir, &media_url))) {
+                    match crate::office::docx_to_html(fpath, Some((media_dir, media_url))) {
                         Ok(html) => {
                             let inner =
                                 format!("{head}<div class=\"md doc\">{}</div>", wrap_tables(&html));
-                            if std::fs::create_dir_all(&media_dir).is_ok() {
+                            if std::fs::create_dir_all(media_dir).is_ok() {
                                 let _ = std::fs::write(&cache, inner.as_bytes());
                             }
                             inner
@@ -1156,13 +1215,13 @@ fn preview_html(st: &Arc<AppState>, token: &str, idx: usize) -> Option<(String, 
             }
         }
         Kind::Sheet => {
-            if f.size > OFFICE_PREVIEW_MAX {
+            if p.size > OFFICE_PREVIEW_MAX {
                 format!(
                     "{head}<p class=muted>表格较大（{}），建议下载后用表格应用打开。</p>",
-                    store::human_size(f.size)
+                    store::human_size(p.size)
                 )
             } else {
-                match crate::office::sheets_to_html(&fpath) {
+                match crate::office::sheets_to_html(fpath) {
                     Ok(html) => {
                         format!("{head}<div class=\"md doc\">{}</div>", wrap_tables(&html))
                     }
@@ -1174,24 +1233,24 @@ fn preview_html(st: &Arc<AppState>, token: &str, idx: usize) -> Option<(String, 
             }
         }
         Kind::Html => {
-            let frame = format!("/h/{token}/{idx}");
+            let frame = &p.frame_url;
             format!(
                 "{head}<iframe src=\"{frame}\" style=\"width:100%;height:78vh;border:1px solid var(--line);border-radius:12px;background:#fff\"></iframe>
 <p class=muted>这份 HTML 在隔离的沙箱里渲染：脚本不执行，站外图片和字体也不加载（内嵌的 <code>data:</code> 图片正常）。<a href=\"{frame}\" target=_blank rel=\"noopener\">在新窗口打开</a>，或点右上「下载原文件」看源码。</p>"
             )
         }
         Kind::Csv => {
-            if f.size > TEXT_PREVIEW_MAX {
+            if p.size > TEXT_PREVIEW_MAX {
                 format!(
                     "{head}<p class=muted>文件较大（{}），页内只适合下载后查看。</p>",
-                    store::human_size(f.size)
+                    store::human_size(p.size)
                 )
             } else {
-                let Ok(bytes) = std::fs::read(&fpath) else {
+                let Ok(bytes) = std::fs::read(fpath) else {
                     return None;
                 };
                 let text = String::from_utf8_lossy(&bytes);
-                let delim = if f.name.to_lowercase().ends_with(".tsv") {
+                let delim = if p.name.to_lowercase().ends_with(".tsv") {
                     '\t'
                 } else {
                     ','
@@ -1203,13 +1262,13 @@ fn preview_html(st: &Arc<AppState>, token: &str, idx: usize) -> Option<(String, 
             }
         }
         Kind::Json => {
-            if f.size > TEXT_PREVIEW_MAX {
+            if p.size > TEXT_PREVIEW_MAX {
                 format!(
                     "{head}<p class=muted>文件较大（{}），页内只适合下载后查看。</p>",
-                    store::human_size(f.size)
+                    store::human_size(p.size)
                 )
             } else {
-                let Ok(bytes) = std::fs::read(&fpath) else {
+                let Ok(bytes) = std::fs::read(fpath) else {
                     return None;
                 };
                 let text = String::from_utf8_lossy(&bytes);
@@ -1217,7 +1276,7 @@ fn preview_html(st: &Arc<AppState>, token: &str, idx: usize) -> Option<(String, 
                 format!("{head}<pre>{}</pre>{note}", esc(&pretty))
             }
         }
-        Kind::Archive => match archive_listing(&fpath, &f.name) {
+        Kind::Archive => match archive_listing(fpath, &p.name) {
             Ok(rows) => format!(
                 "{head}<div class=md><table><thead><tr><th>条目</th><th>大小</th></tr></thead><tbody>{rows}</tbody></table></div>"
             ),
@@ -1230,13 +1289,7 @@ fn preview_html(st: &Arc<AppState>, token: &str, idx: usize) -> Option<(String, 
             "{head}<p class=muted>这种格式不适合在网页里预览，点击下载原文件，到手机后用其他应用打开或转发。</p>"
         ),
     };
-    let body = format!(
-        "{back}<div class=card>{inner}<p class=muted>{} · {}</p></div>{toast}",
-        store::human_size(f.size),
-        esc(&store::fmt_time(meta.created_ms)),
-        toast = toast_js()
-    );
-    Some((f.name.clone(), body))
+    Some(inner)
 }
 
 /// 表格套上横向滚动容器：窄屏不再把列压到一字宽，超宽时可左右滑
@@ -1568,6 +1621,19 @@ fn json_err(code: StatusCode, msg: &str) -> Response {
     (code, Json(json!({"ok": false, "error": msg}))).into_response()
 }
 
+/// 手机上填的子目录：允许 `照片/2026-10` 这种多层，但每一段都单独消毒，
+/// 空段、`.`、`..` 直接丢掉 —— 拼出来永远在所选目录里面。
+fn sanitize_rel_sub(raw: &str) -> String {
+    raw.split(['/', '\\'])
+        .map(|c| c.trim())
+        .filter(|c| !c.is_empty() && *c != "." && *c != "..")
+        .map(store::sanitize_name)
+        .filter(|c| c != "file")
+        .take(8)
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 /// 一次上传的落点。单独拎出来做纯函数，是因为路径拼接的坑不该等真上传时才发现。
 ///
 /// 目录只能按白名单序号选；子目录名和文件名都过 `sanitize_name`（分隔符、`..`、`:`
@@ -1584,6 +1650,19 @@ struct UploadDest {
     name: String,
 }
 
+/// 手机可以写入的所有目录：只进不出的上传目录，加上双向共享的目录。
+/// 页面上分组显示，接口上是一个合并后的序号，`d` 就按这个顺序数。
+fn write_targets(cfg: &Config) -> Vec<(String, bool)> {
+    let mut out: Vec<(String, bool)> = Vec::new();
+    for d in &cfg.upload_dirs {
+        out.push((d.clone(), false));
+    }
+    for d in &cfg.share_dirs {
+        out.push((d.clone(), true));
+    }
+    out
+}
+
 fn upload_target(
     cfg: &Config,
     q: &HashMap<String, String>,
@@ -1592,9 +1671,10 @@ fn upload_target(
     let Some(idx) = q.get("d").and_then(|s| s.trim().parse::<usize>().ok()) else {
         return bad("没说要传到哪个目录");
     };
-    let Some(dir) = cfg.upload_dirs.get(idx) else {
+    let Some((dir, _)) = write_targets(cfg).get(idx).cloned() else {
         return bad("那个目录已经不在白名单里了，刷新页面重选一个");
     };
+    let dir = dir.as_str();
     resolve_dest(
         cfg,
         dir,
@@ -1613,7 +1693,7 @@ fn resolve_dest(
     raw_name: &str,
 ) -> Result<UploadDest, (StatusCode, String)> {
     let bad = |m: &str| Err((StatusCode::BAD_REQUEST, m.to_string()));
-    if !cfg.upload_dirs.iter().any(|d| d == dir) {
+    if !write_targets(cfg).iter().any(|(d, _)| d == dir) {
         return Err((
             StatusCode::FORBIDDEN,
             "那个目录已经从白名单里收回了，先在电脑上重新开放".to_string(),
@@ -1638,12 +1718,7 @@ fn resolve_dest(
             "那个目录现在指向了系统盘（被换成了链接），先在电脑上重新 upload add 一次".to_string(),
         ));
     }
-    let raw_sub = raw_sub.trim();
-    let sub = if raw_sub.is_empty() {
-        String::new()
-    } else {
-        store::sanitize_name(raw_sub)
-    };
+    let sub = sanitize_rel_sub(raw_sub);
     let raw_name = raw_name.trim();
     if raw_name.is_empty() {
         return bad("文件名是空的");
@@ -1703,18 +1778,22 @@ fn need_key() -> Response {
 
 fn upload_form_html(cfg: &Config) -> String {
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let targets = write_targets(cfg);
     let mut dirs = String::new();
-    for (i, d) in cfg.upload_dirs.iter().enumerate() {
+    for (i, (d, browsable)) in targets.iter().enumerate() {
         let gone = !std::path::Path::new(d).is_dir();
+        let note = if gone {
+            "这个目录现在不存在，选了会报错"
+        } else if *browsable {
+            "共享目录 · 传进去的东西手机也能翻到"
+        } else {
+            "手机上的文件会直接落到这里"
+        };
         dirs.push_str(&format!(
             "<label class=updir><input type=radio name=dir value=\"{i}\"{}><span><b>{}</b><small>{}</small></span></label>",
             if i == 0 { " checked" } else { "" },
             esc(d),
-            if gone {
-                "这个目录现在不存在，选了会报错"
-            } else {
-                "手机上的文件会直接落到这里"
-            }
+            note
         ));
     }
     format!(
@@ -2277,6 +2356,455 @@ async fn finalize_upload(
     Ok(where_saved)
 }
 
+/// 共享目录里定位到的一份东西。
+struct ShareItem {
+    /// 白名单那一条解析后的根（canonicalize 过，用来判断有没有逃出去）
+    root: std::path::PathBuf,
+    /// 磁盘上的绝对路径
+    path: std::path::PathBuf,
+    /// 相对根的路径，用 `/` 分隔，用于显示和拼 URL
+    rel: String,
+}
+
+/// 「第 i 个共享目录 + 相对路径」→ 磁盘上的路径，并保证结果还在那个目录里。
+///
+/// 每一段单独查：空段、`.`、以点开头的（`.ssh`、`.env` 这些不该出现在页面上）跳过或拒绝，
+/// `..`、带盘符的、带反斜杠的直接拒。最后 canonicalize 一次再比前缀 —— 防的是有人在共享目录里
+/// 放一个指向外面的链接，那是手机侧改不了的，但电脑端自己放的坑也得替他挡住。
+fn share_resolve(cfg: &Config, i: usize, rel: &str) -> Option<ShareItem> {
+    let raw = cfg.share_dirs.get(i)?;
+    // canonicalize 用来解析链接，但它给的结果带 Windows 的长路径前缀，
+    // 那个前缀是给程序看的，不该印到手机上，也不该参与比较
+    let root = std::fs::canonicalize(raw)
+        .ok()
+        .map(|p| store::clean_abs(&p))?;
+    let mut path = root.clone();
+    let mut clean: Vec<String> = Vec::new();
+    for seg in rel.split('/') {
+        let seg = seg.trim();
+        if seg.is_empty() || seg == "." {
+            continue;
+        }
+        if seg == ".." || seg.starts_with('.') || seg.contains(':') || seg.contains('\\') {
+            return None;
+        }
+        if store::sanitize_name(seg) != seg {
+            return None;
+        }
+        path.push(seg);
+        clean.push(seg.to_string());
+    }
+    let resolved = std::fs::canonicalize(&path)
+        .ok()
+        .map(|p| store::clean_abs(&p))
+        .unwrap_or_else(|| path.clone());
+    if !resolved.starts_with(&root) {
+        return None;
+    }
+    Some(ShareItem {
+        root,
+        path,
+        rel: clean.join("/"),
+    })
+}
+
+/// 共享目录里那份文件的稳定 id：同一个路径 + 同一个大小/修改时间算出同一个值，
+/// 于是 docx 抽出来的图片和渲染缓存能复用；文件被改过就会换新 id，不会拿到旧渲染。
+/// 它同时也是访问那些图片的凭据，所以是 32 位十六进制、看不出来猜不到。
+fn share_media_id(path: &std::path::Path, size: u64, mtime: i64) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h1 = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut h1);
+    size.hash(&mut h1);
+    mtime.hash(&mut h1);
+    let a = h1.finish();
+    let mut h2 = std::collections::hash_map::DefaultHasher::new();
+    "sm".hash(&mut h2);
+    a.hash(&mut h2);
+    path.hash(&mut h2);
+    format!("{a:016x}{:016x}", h2.finish())
+}
+
+/// 拼一个共享目录下的 URL：每一段单独百分号编码，中文和空格都走得通。
+fn share_url(prefix: &str, i: usize, rel: &str) -> String {
+    let segs: Vec<String> = rel
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .map(pct_encode)
+        .collect();
+    if segs.is_empty() {
+        format!("{prefix}/{i}")
+    } else {
+        format!("{prefix}/{i}/{}", segs.join("/"))
+    }
+}
+
+fn need_key_redirect() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        Html(page(
+            "访问验证",
+            "<h1>共享目录需要密钥</h1><div class=card><form onsubmit=\"location='/s?key='+encodeURIComponent(document.getElementById('k').value);return false\"><input id=k type=password placeholder=\"访问密钥\" style=\"width:100%;padding:10px;border:1px solid var(--line);border-radius:8px;font:inherit\"><button class=btn style=\"margin-top:10px\">进入</button></form><p class=muted>共享目录能看到电脑上那个文件夹里的所有文件名，所以必须带密钥。</p></div>",
+        )),
+    )
+        .into_response()
+}
+
+/// `GET /s` —— 开了哪些共享目录
+async fn share_index(
+    State(st): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let cfg = st.current_cfg();
+    if !key_matches(&cfg, &headers, &q) {
+        return need_key_redirect();
+    }
+    let mut res = Html(page("共享目录", &share_index_html(&cfg))).into_response();
+    if q.contains_key("key") {
+        set_key_cookie(&mut res, &cfg);
+    }
+    res
+}
+
+fn share_index_html(cfg: &Config) -> String {
+    let mut rows = String::new();
+    if cfg.share_dirs.is_empty() {
+        rows = "<p class=muted>还没有开放的共享目录。在电脑上运行 <code>postbox share add D:\\某个目录</code> 开一个。</p>".to_string();
+    }
+    for (i, d) in cfg.share_dirs.iter().enumerate() {
+        let gone = !std::path::Path::new(d).is_dir();
+        rows.push_str(&format!(
+            "<li><div><a href=\"/s/{i}\"><b>{}</b></a><div class=muted>{}</div></div><a class=\"btn ghost\" href=\"/s/{i}\">打开</a></li>",
+            esc(d),
+            if gone { "这个目录现在不存在" } else { "可浏览 · 可上传" }
+        ));
+    }
+    format!(
+        "<header class=top><a class=back href=\"/\">← 全部文件</a><span class=badge>手机 ⇄ 电脑</span></header>\
+<div class=card><h1>共享目录</h1><p class=hint>这些目录电脑和手机两边都能看：手机可以翻、可以下载，也可以往里传。</p><ul class=files>{rows}</ul></div>"
+    )
+}
+
+/// `GET /s/{i}` —— 某个共享目录的根
+async fn share_root_dir(
+    State(st): State<Arc<AppState>>,
+    APath(i): APath<usize>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    share_dir_page(&st, i, String::new(), &headers, &q).await
+}
+
+/// `GET /s/{i}/{*rest}` —— 目录就列，文件就预览
+async fn share_item(
+    State(st): State<Arc<AppState>>,
+    APath((i, rest)): APath<(usize, String)>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let cfg = st.current_cfg();
+    let is_dir = match share_resolve(&cfg, i, &rest) {
+        Some(it) => it.path.is_dir(),
+        None => return not_found(),
+    };
+    if is_dir {
+        share_dir_page(&st, i, rest, &headers, &q).await
+    } else {
+        match tokio::task::spawn_blocking(move || share_file_page(&st, i, &rest)).await {
+            Ok(res) => res,
+            Err(_) => internal_error(),
+        }
+    }
+}
+
+/// 目录列表：先目录后文件，隐藏点开头的东西，最多 500 条
+fn share_dir_html(cfg: &Config, i: usize, it: &ShareItem) -> String {
+    let rd = match std::fs::read_dir(&it.path) {
+        Ok(r) => r,
+        Err(_) => return "<p class=muted>这个目录读不了（权限？）。".to_string(),
+    };
+    let mut dirs: Vec<(String, std::path::PathBuf)> = Vec::new();
+    let mut files: Vec<(String, u64, i64)> = Vec::new();
+    let mut total = 0usize;
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') {
+            continue;
+        }
+        total += 1;
+        let meta = e.metadata().ok();
+        if meta.as_ref().is_some_and(|m| m.is_dir()) {
+            dirs.push((name, e.path()));
+        } else if let Some(m) = meta {
+            let mt = m
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            files.push((name, m.len(), mt));
+        }
+    }
+    dirs.sort_by_key(|d| d.0.to_lowercase());
+    files.sort_by_key(|f| f.0.to_lowercase());
+    let mut rows = String::new();
+    for (name, _) in &dirs {
+        let rel = if it.rel.is_empty() {
+            name.clone()
+        } else {
+            format!("{}/{}", it.rel, name)
+        };
+        rows.push_str(&format!(
+            "<li><div><a href=\"{}\"><b>{}</b></a><div class=muted>目录</div></div><a class=\"btn ghost\" href=\"{}\">进入</a></li>",
+            share_url("/s", i, &rel),
+            esc(name),
+            share_url("/s", i, &rel)
+        ));
+    }
+    for (name, size, mt) in &files {
+        let rel = if it.rel.is_empty() {
+            name.clone()
+        } else {
+            format!("{}/{}", it.rel, name)
+        };
+        rows.push_str(&format!(
+            "<li><div><a href=\"{}\"><b>{}</b></a><div class=muted>{} · {}</div></div><a class=\"btn ghost\" href=\"{}\">下载</a></li>",
+            share_url("/s", i, &rel),
+            esc(name),
+            store::human_size(*size),
+            esc(&store::fmt_time(*mt)),
+            share_url("/sd", i, &rel)
+        ));
+    }
+    if rows.is_empty() {
+        rows = "<p class=muted>这个目录是空的。</p>".to_string();
+    }
+    let truncated = if total > 500 {
+        format!("<p class=muted>一共 {total} 项，只列出前 500 项。</p>")
+    } else {
+        String::new()
+    };
+    let up = write_targets(cfg)
+        .iter()
+        .position(|(d, _)| d == &cfg.share_dirs[i])
+        .map(|di| {
+            format!(
+                "<p><a class=btn href=\"/upload?d={di}&sub={}\">传东西到这个文件夹</a></p>",
+                pct_encode(&it.rel)
+            )
+        })
+        .unwrap_or_default();
+    format!(
+        "<div class=card><h1>{}</h1><p class=hint>电脑上的路径：<code>{}</code></p>{up}<ul class=files>{rows}{truncated}</ul></div>",
+        esc(if it.rel.is_empty() { &cfg.share_dirs[i] } else { &it.rel }),
+        esc(&it.root.display().to_string()),
+    )
+}
+
+async fn share_dir_page(
+    st: &Arc<AppState>,
+    i: usize,
+    rest: String,
+    headers: &HeaderMap,
+    q: &HashMap<String, String>,
+) -> Response {
+    let cfg = st.current_cfg();
+    if !key_matches(&cfg, headers, q) {
+        return need_key_redirect();
+    }
+    let it = match share_resolve(&cfg, i, &rest) {
+        Some(v) => v,
+        None => return not_found(),
+    };
+    if !it.path.is_dir() {
+        return not_found();
+    }
+    let (parent, up_text) = match it.rel.rfind('/') {
+        Some(p) => (share_url("/s", i, &it.rel[..p]), "← 上一层"),
+        None => ("/".to_string(), "← 首页"),
+    };
+    let body = format!(
+        "<header class=top><a class=back href=\"{}\">{}</a><a class=\"btn ghost\" href=\"/s\">其他共享目录</a></header>{}",
+        parent,
+        up_text,
+        share_dir_html(&cfg, i, &it)
+    );
+    Html(page("共享目录", &body)).into_response()
+}
+
+/// 共享目录里的一份文件：直接套文件包那套预览，只是地址换成 /sf 和 /sd
+fn share_file_page(st: &Arc<AppState>, i: usize, rest: &str) -> Response {
+    let cfg = st.current_cfg();
+    let it = match share_resolve(&cfg, i, rest) {
+        Some(v) => v,
+        None => return not_found(),
+    };
+    let meta = match std::fs::metadata(&it.path) {
+        Ok(m) => m,
+        Err(_) => return not_found(),
+    };
+    let name = it.rel.rsplit('/').next().unwrap_or(&it.rel).to_string();
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let id = share_media_id(&it.path, meta.len(), mtime);
+    let p = Previewable {
+        name: name.clone(),
+        path: it.path.clone(),
+        size: meta.len(),
+        raw_url: share_url("/sf", i, &it.rel),
+        dl_url: share_url("/sd", i, &it.rel),
+        frame_url: share_url("/sh", i, &it.rel),
+        media_dir: st.root.join("tmp").join(format!("sm-{id}")),
+        media_url: format!("/sm/{id}"),
+    };
+    let inner = match render_preview(&p) {
+        Some(v) => v,
+        None => return not_found(),
+    };
+    let back = format!(
+        "<header class=top><a class=back href=\"{}\">← 返回这个文件夹</a><a class=btn href=\"{}\">下载原文件</a></header>",
+        share_url(
+            "/s",
+            i,
+            match it.rel.rfind('/') {
+                Some(x) => &it.rel[..x],
+                None => "",
+            }
+        ),
+        p.dl_url
+    );
+    let body = format!(
+        "{back}<div class=card>{inner}<p class=muted>{} · 改于 {}</p></div>{toast}",
+        store::human_size(p.size),
+        esc(&store::fmt_time(mtime)),
+        toast = toast_js()
+    );
+    Html(page(&name, &body)).into_response()
+}
+
+/// `GET /sf/...` 内联取共享目录里的文件（带 Range，播放器要用）
+async fn share_raw(
+    State(st): State<Arc<AppState>>,
+    APath((i, rest)): APath<(usize, String)>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    share_file(&st, i, &rest, &headers, &q, false).await
+}
+
+/// `GET /sd/...` 下载共享目录里的文件
+async fn share_dl(
+    State(st): State<Arc<AppState>>,
+    APath((i, rest)): APath<(usize, String)>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    share_file(&st, i, &rest, &headers, &q, true).await
+}
+
+async fn share_file(
+    st: &Arc<AppState>,
+    i: usize,
+    rest: &str,
+    headers: &HeaderMap,
+    q: &HashMap<String, String>,
+    attachment: bool,
+) -> Response {
+    let cfg = st.current_cfg();
+    // Cookie 或 ?key= 都认：页面上的 <img>/<video> 用的是这些地址，
+    // 只认 Cookie 的话，从 ?key= 进来又没写成功 Cookie 的场景会整页哑掉
+    if !key_matches(&cfg, headers, q) {
+        return json_err(
+            StatusCode::UNAUTHORIZED,
+            "需要访问密钥（Cookie 里没有就先打开首页输一次）。",
+        );
+    }
+    let it = match share_resolve(&cfg, i, rest) {
+        Some(v) => v,
+        None => return not_found(),
+    };
+    if it.path.is_dir() || !it.path.is_file() {
+        return not_found();
+    }
+    let name = it.rel.rsplit('/').next().unwrap_or(&it.rel).to_string();
+    let mime = file_mime(&name);
+    file_response(&it.path, &name, attachment, &mime, range_of(headers)).await
+}
+
+/// `GET /sh/...` 共享目录里的 HTML 在沙箱里渲染，和文件包那份同一套规则
+async fn share_frame(
+    State(st): State<Arc<AppState>>,
+    APath((i, rest)): APath<(usize, String)>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let cfg = st.current_cfg();
+    if !key_matches(&cfg, &headers, &q) {
+        return need_key_redirect();
+    }
+    let it = match share_resolve(&cfg, i, &rest) {
+        Some(v) => v,
+        None => return not_found(),
+    };
+    let size = match std::fs::metadata(&it.path) {
+        Ok(m) => m.len(),
+        Err(_) => return not_found(),
+    };
+    if !it.path.is_file() || size > TEXT_PREVIEW_MAX {
+        return share_file(&st, i, &rest, &headers, &q, false).await;
+    }
+    let Ok(bytes) = std::fs::read(&it.path) else {
+        return not_found();
+    };
+    let Ok(html) = String::from_utf8(bytes) else {
+        return share_file(&st, i, &rest, &headers, &q, false).await;
+    };
+    // 报告里引用的同目录图片，照样内联成 data: URI
+    let mut siblings: HashMap<String, std::path::PathBuf> = HashMap::new();
+    if let Some(parent) = it.path.parent() {
+        if let Ok(rd) = std::fs::read_dir(parent) {
+            for e in rd.flatten() {
+                let n = e.file_name().to_string_lossy().to_lowercase();
+                siblings.entry(n).or_insert_with(|| e.path());
+            }
+        }
+    }
+    Html(inline_html_resources(&html, &siblings)).into_response()
+}
+
+/// `GET /sm/{id}/{name}` —— 共享目录里那份 docx 抽出来的图片。
+/// 这里的 id 本身就是凭据（32 位十六进制、猜不到），所以不再查文件包。
+async fn preview_media_shared(
+    State(st): State<Arc<AppState>>,
+    APath((id, name)): APath<(String, String)>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    if !valid_upload_id(&id)
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+        || name.contains(':')
+        || name.starts_with('.')
+    {
+        return not_found();
+    }
+    if !key_matches(&st.current_cfg(), &headers, &q) {
+        return need_key_redirect();
+    }
+    let path = st.root.join("tmp").join(format!("sm-{id}")).join(&name);
+    if !path.is_file() {
+        return not_found();
+    }
+    let mime = file_mime(&name);
+    file_response(&path, &name, false, &mime, range_of(&headers)).await
+}
+
 async fn api_feedback(
     State(st): State<Arc<AppState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -2345,6 +2873,7 @@ async fn api_feedback(
     let cfg = st.current_cfg();
     crate::notify::push(
         &cfg,
+        &st.root,
         &format!("手机反馈 · {}", fb.title),
         &format!("{}\n可在电脑端运行 postbox inbox 查看全文", fb.text),
     );
@@ -2368,6 +2897,13 @@ pub async fn serve(root: PathBuf, cfg: Config) -> anyhow::Result<()> {
         .route("/d/{token}/{idx}", get(dl_file))
         .route("/m/{token}/{idx}/{name}", get(preview_media))
         .route("/upload", get(upload_page))
+        .route("/s", get(share_index))
+        .route("/s/{i}", get(share_root_dir))
+        .route("/s/{i}/{*rest}", get(share_item))
+        .route("/sf/{i}/{*rest}", get(share_raw))
+        .route("/sd/{i}/{*rest}", get(share_dl))
+        .route("/sh/{i}/{*rest}", get(share_frame))
+        .route("/sm/{id}/{name}", get(preview_media_shared))
         .route("/api/feedback/{token}", axum::routing::post(api_feedback))
         .route("/api/upload", axum::routing::post(api_upload))
         .route("/api/upload/chunk", axum::routing::post(api_upload_chunk))
@@ -2553,6 +3089,130 @@ mod tests {
     }
 
     /// 上传页绝不能出现明文访问密钥 —— 和文件页同一条规矩。
+    fn cfg_with_shares(dirs: &[PathBuf]) -> Config {
+        let st = state("share");
+        Config {
+            share_dirs: dirs.iter().map(|d| d.display().to_string()).collect(),
+            upload_dirs: vec![],
+            ..st.cfg.clone()
+        }
+    }
+
+    #[test]
+    fn share_resolve_stays_inside_the_opened_folder() {
+        let root = std::env::temp_dir().join(format!("postbox-share-{}", store::now_ms()));
+        std::fs::create_dir_all(root.join("照片/2026")).unwrap();
+        std::fs::write(root.join("a.txt"), b"x").unwrap();
+        std::fs::write(root.join(".env"), b"secret").unwrap();
+        let cfg = cfg_with_shares(std::slice::from_ref(&root));
+        let rootc = store::clean_abs(&std::fs::canonicalize(&root).unwrap());
+
+        // 正常路径
+        let it = share_resolve(&cfg, 0, "照片/2026").unwrap();
+        assert!(it.path.ends_with("2026"));
+        assert!(it.path.starts_with(&rootc));
+        assert_eq!(it.root, rootc, "展示用的根不该带 Windows 的长路径前缀");
+        assert!(share_resolve(&cfg, 0, "a.txt").is_some());
+        // 越界、盘符、反斜杠、`..` 一律拒
+        assert!(share_resolve(&cfg, 0, "../escape").is_none());
+        assert!(share_resolve(&cfg, 0, "a/../../b").is_none());
+        assert!(share_resolve(&cfg, 0, "C:/Windows/win.ini").is_none());
+        assert!(share_resolve(&cfg, 0, "..\\\\windows").is_none());
+        // 点开头的文件不给看（.ssh / .env 这类不该出现在共享目录里）
+        assert!(share_resolve(&cfg, 0, ".env").is_none());
+        // 越界序号
+        assert!(share_resolve(&cfg, 9, "").is_none());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn share_subfolder_names_allow_nesting_but_not_escape() {
+        assert_eq!(sanitize_rel_sub("照片/2026-10"), "照片/2026-10");
+        assert_eq!(sanitize_rel_sub("a//b/"), "a/b");
+        // `..` 和 `.` 被丢掉，剩下的仍然在所选目录里
+        assert_eq!(sanitize_rel_sub("../../Windows"), "Windows");
+        assert_eq!(sanitize_rel_sub("./a/../b"), "a/b");
+        assert_eq!(sanitize_rel_sub(""), "");
+        assert_eq!(sanitize_rel_sub("a\\b\\c"), "a/b/c");
+        // 层数封顶，别让人拿它堆出一条超长路径
+        assert_eq!(
+            sanitize_rel_sub("a/b/c/d/e/f/g/h/i/j/k").split('/').count(),
+            8
+        );
+    }
+
+    #[test]
+    fn share_media_id_is_stable_and_follows_the_file() {
+        let path = std::path::PathBuf::from("D:/x/报告.docx");
+        let a = share_media_id(&path, 100, 1000);
+        assert_eq!(a.len(), 32);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(
+            a,
+            share_media_id(&path, 100, 1000),
+            "同一个文件必须算出同个 id"
+        );
+        // 文件被改过就要换 id，否则共享目录里改了 docx 还在看旧渲染
+        assert_ne!(a, share_media_id(&path, 101, 1000));
+        assert_ne!(a, share_media_id(&path, 100, 1001));
+        assert_ne!(
+            a,
+            share_media_id(&std::path::PathBuf::from("D:/y/报告.docx"), 100, 1000)
+        );
+    }
+
+    #[test]
+    fn share_urls_percent_encode_each_segment() {
+        assert_eq!(share_url("/s", 0, ""), "/s/0");
+        assert_eq!(share_url("/sd", 1, "a.txt"), "/sd/1/a.txt");
+        // 中文和空格都要编码，否则手机浏览器拼出来的地址是坏的
+        let u = share_url("/sf", 0, "照片文件/a b.png");
+        assert!(u.starts_with("/sf/0/"), "{u}");
+        assert!(!u.contains(' '), "{u}");
+        assert!(u.contains("%20"), "{u}");
+    }
+
+    /// 共享页和上传页都不能出现明文密钥 —— 和文件页同一条规矩
+    #[test]
+    fn share_pages_never_leak_access_key() {
+        let root = std::env::temp_dir().join(format!("postbox-sharepage-{}", store::now_ms()));
+        std::fs::create_dir_all(root.join("子目录")).unwrap();
+        std::fs::write(root.join("子目录/b.pdf"), b"y").unwrap();
+        std::fs::write(root.join("secret.txt"), b"z").unwrap();
+        std::fs::write(root.join(".hidden"), b"z").unwrap();
+        let cfg = cfg_with_shares(std::slice::from_ref(&root));
+
+        let idx = share_index_html(&cfg);
+        assert!(!idx.contains("SECRET-KEY-1234567890"), "{idx}");
+        assert!(idx.contains(&root.display().to_string()));
+
+        let it = share_resolve(&cfg, 0, "").unwrap();
+        let listing = share_dir_html(&cfg, 0, &it);
+        assert!(!listing.contains("SECRET-KEY-1234567890"), "{listing}");
+        assert!(listing.contains("secret.txt"), "{listing}");
+        assert!(listing.contains("子目录"), "{listing}");
+        // 隐藏文件不进列表
+        assert!(!listing.contains(".hidden"), "{listing}");
+        // 目录排在前面
+        assert!(listing.find("子目录") < listing.find("secret.txt"));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn write_targets_lists_dropboxes_then_shares() {
+        let st = state("wt");
+        let cfg = Config {
+            upload_dirs: vec!["D:/drop-a".into(), "D:/drop-b".into()],
+            share_dirs: vec!["D:/share-a".into()],
+            ..st.cfg.clone()
+        };
+        let t = write_targets(&cfg);
+        assert_eq!(t.len(), 3);
+        assert_eq!(t[0], ("D:/drop-a".to_string(), false));
+        assert_eq!(t[2], ("D:/share-a".to_string(), true));
+        std::fs::remove_dir_all(&st.root).ok();
+    }
+
     #[test]
     fn chunk_plan_only_appends_in_order() {
         // 顺序对上就收
@@ -3054,6 +3714,7 @@ mod tests {
                 cloudflared: "tools/cloudflared.exe".into(),
                 bind: "0.0.0.0".into(),
                 upload_dirs: vec![],
+                share_dirs: vec![],
                 upload_max_mb: store::UPLOAD_MAX_DEFAULT_MB,
             },
             fb_hits: Mutex::new(HashMap::new()),

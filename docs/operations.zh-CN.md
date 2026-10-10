@@ -8,7 +8,7 @@
 
 | 角色 | 实体 | 什么时候活着 | 干什么 |
 | --- | --- | --- | --- |
-| 网页服务 | `postbox up` | 常驻（注册自启后开机隐藏运行） | 存文件、渲染手机页面、收反馈、接收手机上传、定时清过期包 |
+| 网页服务 | `postbox up` | 常驻（注册自启后开机隐藏运行） | 存文件、渲染手机页面、收反馈、接收手机上传、双向服务共享目录、定时清过期包 |
 | 公网隧道 | `tools/cloudflared.exe` | 上一条的子进程，被它监督，挂了会退避重启 | 开一扇对外的门，发一个 `xxx.trycloudflare.com` 域名 |
 | 推送 | ntfy.sh（公共服务器，不在你机器上） | 不需要常驻，调用系统 `curl` 发一条就走 | 有新文件时敲你手机一下 |
 | MCP 服务 | `postbox mcp` | agent 客户端启动时拉起，客户端退出即消失 | 让 agent 用工具调用上面三件事 |
@@ -40,6 +40,9 @@ data/autostart.vbs         只有注册了 Windows 登录自启才会有
 - [ ] 手机上的宽表格是左右滑动而不是挤成一团
 - [ ] 把链接发给别人，对方在没有你任何账号的情况下能打开（这就是交付能力）
 - [ ] `postbox upload add D:\某个目录` 之后，手机打开 `/upload`：传一个小文件，它落到那个目录（或你现填的小文件夹）里，`postbox uploads` 能看到这条流水
+- [ ] `postbox share add D:\library` 之后：`/s` 列出共享目录，`/s/<序号>` 能翻（目录在前、以点开头的项不出现），点开一个文件用的就是文件包那套预览（视频能拖、docx 图片能显示）
+- [ ] 从共享目录页上的「传东西到这个文件夹」传进去的文件，确实落在那一层，刷新就能看到
+- [ ] `postbox logs` 能看到隧道就绪和推送记录；重启后约 30 秒内手机收到「postbox 新地址」推送 —— 没收到时 `logs` 会写明推送是不是失败了、为什么
 - [ ] 同一个文件名传两次得到 `名字 (1).ext`，电脑上原有那份没被顶掉
 - [ ] `postbox upload add C:nything` 被拒绝并说清楚为什么；一个还不存在的目录同样被拒绝
 - [ ] 不带访问密钥时上传页回 401，`POST /api/upload` 也回 401
@@ -61,7 +64,8 @@ data/autostart.vbs         只有注册了 Windows 登录自启才会有
 | `up` 退出 | 页面打不开；MCP 照样往 `data/` 里发布 | 再跑一次 `postbox up`，或等登录自启 |
 | 改 `port` / `bind` / `tunnel` | 正在跑的服务仍用旧值 | 重启 `postbox up` |
 | 改 `access_key` / `ntfy_topic` | 不用重启，服务会重新读配置文件 | 换了主题手机要重新订阅 |
-| `upload add` / `upload rm` 一个目录，或改 `upload_max_mb` | 不用重启就生效；目录清空后首页连入口都不显示 | 无 |
+| `upload add` / `upload rm` / `share add` / `share rm` 一个目录，或改 `upload_max_mb` | 不用重启就生效；目录清空后首页连入口都不显示 | 无 |
+| 上传进行到一半时把那个目录收回 | 最后一片会被拒，什么都不写 | 重新打开页面再传一次 |
 | 上传中途断了 | 半成品在 `data/tmp/up-<id>.part`，超过一天由例行清理收掉 | 重传那个文件即可，新会话从零开始 |
 | `data/config.json` 丢了 | 除 `init` 外的命令都会拒绝运行，重建后是全新的密钥和主题 | 手机重新订阅；旧文件包链接仍然能打开（token 存在 `bundles/` 里） |
 
@@ -113,6 +117,9 @@ postbox autostart uninstall    :: 删计划任务或 HKCU\...\Run 项 + data/aut
 | 上传页里一个目录都没有 | `upload_dirs` 是空的 | `postbox upload add D:\某个目录` |
 | 上传跑到 150–170 秒被 502/524 掐断 | 那是隧道的请求时限，不是 `upload_max_mb`；超过 48 MB 本来就该走切片，整文件失败说明没用到切片那条路 | 核对 `postbox --version` 是否当前代码；特别大的还是同一 Wi-Fi / Tailscale |
 | 上传说目录不存在 | 电脑上那个目录被改名或删了 | `postbox upload list` 会标出来，重新 add 或收回 |
+| 共享目录回 401 | `/s`、`/sf`、`/sd`、`/sh`、`/sm` 全都要密钥，浏览器得带上 Cookie 或在地址里加 `?key=` | 先打开一次 `/?key=…`，或者给链接补上 `?key=…` |
+| 共享列表里找不到某个文件 | 它的名字以点开开头，或者那个目录超过 500 项 | 设计如此；改个名字或者往深处翻 |
+| 重启后手机没收到「新地址」推送 | `postbox logs` 会写推送有没有失败、为什么（curl 找不到、主题为空、ntfy 拒绝） | 按原因修；`postbox notify-test` 重测一次链路 |
 | Word 文字有了但图片没有 | 图片解在 `data/tmp/m-<token>-<idx>/`，文件包过期时会被一起删掉 | 重新发布一次 |
 | `cargo build` 报「拒绝访问（os error 5）」 | exe 正在被服务或某个 MCP 进程占用 | 先结束对应进程，或换 `--target-dir` |
 | 首页地址或密钥忘了 | `postbox token` | 打印 `<公网地址>/?key=<访问密钥>` |

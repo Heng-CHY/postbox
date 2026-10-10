@@ -51,6 +51,12 @@ path — it picks one of `upload_dirs` by number, and both the subfolder name an
 go through `sanitize_name`, so the worst a hostile client can do is ask for a folder that does
 not exist.
 
+Shared folders (`postbox share add`) reuse that machinery from the other side: `/s/<i>/<path>`
+browses a folder and previews a file with the very same renderer bundles use, `/sf` and `/sd`
+hand out the bytes (inline and as an attachment), `/sh` renders a shared `.html` under
+`sandbox`, and `/sm/<id>/<name>` serves the images extracted from a shared `.docx`. Each of
+those resolves the path, canonicalizes it, and refuses a result outside the opened folder.
+
 ## Where the code lives
 
 ```
@@ -58,7 +64,7 @@ src/main.rs     CLI surface (clap), subcommand dispatch
 src/store.rs    config, bundle metadata, publish, expiry housekeeping, feedback and
                 upload logs
 src/serve.rs    axum routes, HTML pages, the CSS, Markdown rendering, previews,
-                Range streaming and the upload endpoint
+                Range streaming, uploads and shared-folder browsing
 src/office.rs   .docx → HTML (zip + quick-xml), .xlsx/.xls/.ods → HTML (calamine)
 src/tunnel.rs   spawn cloudflared, restart it with backoff, update base_url, push the link
 src/notify.rs   ntfy push through the system curl

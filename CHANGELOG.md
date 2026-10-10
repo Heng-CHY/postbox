@@ -6,7 +6,35 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-## [0.3.0] — 2026-10-09
+### Added
+
+- **Shared folders.** `postbox share add D:\library` opens a folder in both directions: the
+  phone browses it (`/s/<i>/<path>`), previews anything inside with the same renderer bundles
+  use — video that seeks, `.docx` with its images, Markdown tables, `.html` in a sandbox —
+  downloads it, and uploads back into any subfolder. Entries whose name starts with a dot are
+  never listed and cannot be fetched, and every request canonicalizes the path and refuses a
+  result outside the opened folder, so neither `..` nor a link left inside it walks out.
+  `share list` / `share rm` manage it; revoking a folder mid-upload refuses the last piece
+  instead of writing anyway.
+- `postbox logs`, and an event log at `data/inbox/events.log`. `up` runs hidden under wscript,
+  so its stdout went nowhere and "did the new-address push fire?" could only be guessed. Push
+  attempts, tunnel events and failures now reach the disk — `notify::push` waits for `curl` on
+  a background thread to find out whether it worked.
+
+### Changed
+
+- To the phone the upload whitelist and the share whitelist are one list: `d` counts the
+  folders it may write to, upload-only ones first. The upload page labels which is which, and
+  each shared folder's own page links to it with the right number.
+- The `upload` and `share` subcommands share one implementation, so `add` / `list` / `rm`
+  behave the same way on both.
+
+### Fixed
+
+- `share add`'s browse root used to print Windows' long-path prefix; the display path is
+  cleaned now, which is also the form the containment check compares against.
+- `/sf`, `/sd`, `/sh` and `/sm` accepted only the cookie, so a page opened straight from a
+  `?key=` link showed no video, no inlined report images and no docx pictures.
 
 Two directions instead of one: a phone can now push files back into folders the PC opens,
 and video served to a phone actually plays and seeks. A minor bump because `config.json`
@@ -68,10 +96,11 @@ re-publishing.
   a `.ts` source file is the more common thing an agent publishes here.
 - `/m/` (the images pulled out of a `.docx`) now goes through the same sender as the other
   file routes instead of carrying its own copy.
-- The test suite grows from 46 to 64 tests: range planning, container classification, the
-  media `Content-Type` overrides, two page-level tests that publish a clip and read back the
-  rendered player, and the upload whitelist (path traversal, index-out-of-range, missing key,
-  system-drive refusal, name collision).
+- The test suite grows from 46 to 76 tests: range planning, container classification, the
+  media `Content-Type` overrides, page-level tests that publish a clip and read back the
+  rendered player, the upload whitelist (path traversal, index-out-of-range, missing key,
+  system-drive refusal, name collision), chunk planning, and shared-folder resolution
+  (escaping, dot entries, long-path prefixes, listing order).
 
 ### Fixed
 

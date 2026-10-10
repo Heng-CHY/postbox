@@ -90,7 +90,7 @@ fn do_call(root: &Path, req: &Value) -> Result<Value> {
             match store::publish(root, &paths, title, note.clone(), days) {
                 Ok(meta) => {
                     let page = format!("{base}/b/{}", meta.token);
-                    notify::push(&cfg, &format!("已发布: {}", meta.title), &page);
+                    notify::push(&cfg, root, &format!("已发布: {}", meta.title), &page);
                     (
                         format!(
                             "已发布「{}」，共 {} 个文件\n手机页: {page}",
@@ -120,7 +120,7 @@ fn do_call(root: &Path, req: &Value) -> Result<Value> {
             match store::publish(root, std::slice::from_ref(&path), title, note.clone(), 30) {
                 Ok(meta) => {
                     let page = format!("{base}/b/{}", meta.token);
-                    notify::push(&cfg, &format!("已发布: {}", meta.title), &page);
+                    notify::push(&cfg, root, &format!("已发布: {}", meta.title), &page);
                     (format!("已发布「{}」\n手机页: {page}", meta.title), false)
                 }
                 Err(e) => (format!("发布失败: {e}"), true),

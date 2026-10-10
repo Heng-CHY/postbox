@@ -1,4 +1,4 @@
-use std::path::{Component, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -37,6 +37,13 @@ fn cfg_display(cfg: &store::Config, key: &str) -> String {
             }
         }
         "upload_max_mb" => format!("{} MB", cfg.upload_max_mb),
+        "share_dirs" => {
+            if cfg.share_dirs.is_empty() {
+                "(没开放)".into()
+            } else {
+                cfg.share_dirs.join(", ")
+            }
+        }
         _ => String::new(),
     }
 }
@@ -94,8 +101,18 @@ enum Cmd {
         #[command(subcommand)]
         action: UploadAction,
     },
+    /// 双向共享目录：手机可以浏览、下载、上传
+    Share {
+        #[command(subcommand)]
+        action: ShareAction,
+    },
     /// 查看手机上传过来的文件记录
     Uploads {
+        #[arg(short, long, default_value_t = 20)]
+        n: usize,
+    },
+    /// 查看服务侧事件（隧道就绪、推送成功/失败），排查「手机为什么没收到推送」
+    Logs {
         #[arg(short, long, default_value_t = 20)]
         n: usize,
     },
@@ -109,6 +126,16 @@ enum Cmd {
 enum AutostartAction {
     Install,
     Uninstall,
+}
+
+#[derive(Subcommand)]
+enum ShareAction {
+    /// 开放一个目录给手机浏览和上传（必须已存在，且不能在系统盘上）
+    Add { path: PathBuf },
+    /// 列出已开放的共享目录
+    List,
+    /// 收回一个共享目录：给序号（`share list` 里的编号）或完整路径
+    Rm { which: String },
 }
 
 #[derive(Subcommand)]
@@ -228,6 +255,148 @@ fn apply_config_field(
     Ok(())
 }
 
+/// `upload` 和 `share` 两个子命令做的是同一件事，只是配置字段和给用户的说法不同。
+enum Wl {
+    Add(PathBuf),
+    List,
+    Rm(String),
+}
+
+#[derive(Clone, Copy)]
+enum WlKind {
+    Upload,
+    Share,
+}
+
+impl WlKind {
+    fn label(self) -> &'static str {
+        match self {
+            WlKind::Upload => "上传",
+            WlKind::Share => "共享",
+        }
+    }
+    fn cmd(self) -> &'static str {
+        match self {
+            WlKind::Upload => "upload",
+            WlKind::Share => "share",
+        }
+    }
+    fn page(self) -> &'static str {
+        match self {
+            WlKind::Upload => "/upload",
+            WlKind::Share => "/s",
+        }
+    }
+    fn get(self, cfg: &store::Config) -> &Vec<String> {
+        match self {
+            WlKind::Upload => &cfg.upload_dirs,
+            WlKind::Share => &cfg.share_dirs,
+        }
+    }
+    fn push(self, cfg: &mut store::Config, v: String) {
+        match self {
+            WlKind::Upload => cfg.upload_dirs.push(v),
+            WlKind::Share => cfg.share_dirs.push(v),
+        }
+    }
+    fn remove(self, cfg: &mut store::Config, i: usize) {
+        match self {
+            WlKind::Upload => {
+                cfg.upload_dirs.remove(i);
+            }
+            WlKind::Share => {
+                cfg.share_dirs.remove(i);
+            }
+        }
+    }
+}
+
+fn whitelist(root: &Path, action: Wl, kind: WlKind) -> Result<()> {
+    let cmd = kind.cmd();
+    let cfg = store::load_config(root)?;
+    let base = cfg
+        .base_url
+        .clone()
+        .unwrap_or_else(|| format!("http://127.0.0.1:{}", cfg.port));
+    match action {
+        Wl::Add(path) => {
+            let abs = store::validate_upload_dir(&path)?;
+            if kind.get(&cfg).iter().any(|d| d == &abs) {
+                println!("已经在白名单里: {abs}");
+                return Ok(());
+            }
+            if kind.get(&cfg).len() >= store::MAX_UPLOAD_DIRS {
+                anyhow::bail!(
+                    "最多开放 {} 个目录，先用 postbox {cmd} rm <编号> 收一个",
+                    store::MAX_UPLOAD_DIRS
+                );
+            }
+            store::update_config(root, |c| {
+                kind.push(c, abs.clone());
+                Ok(())
+            })?;
+            println!("已开放: {abs}");
+            println!(
+                "手机页: {base}{}?key={}（服务在跑的话立刻生效，不用重启）",
+                kind.page(),
+                cfg.access_key
+            );
+        }
+        Wl::List => {
+            let dirs = kind.get(&cfg);
+            if dirs.is_empty() {
+                println!(
+                    "还没有开放任何{label}目录。\n开放一个: postbox {cmd} add D:\\\\某个目录",
+                    label = kind.label()
+                );
+            }
+            for (i, d) in dirs.iter().enumerate() {
+                let p = std::path::PathBuf::from(d);
+                let note = if !p.is_dir() {
+                    "  ← 这个目录现在不存在，手机打开它会报错"
+                } else if store::is_system_volume(&p) {
+                    "  ← 在系统盘上，建议收回"
+                } else {
+                    ""
+                };
+                println!("[{i}] {d}{note}");
+            }
+        }
+        Wl::Rm(which) => {
+            let find = |dirs: &[String]| -> Option<usize> {
+                if let Ok(i) = which.trim().parse::<usize>() {
+                    return if i < dirs.len() { Some(i) } else { None };
+                }
+                let want = which.trim_end_matches(['/', '\\']);
+                dirs.iter().position(|d| {
+                    let d = d.trim_end_matches(['/', '\\']);
+                    d.eq_ignore_ascii_case(want)
+                })
+            };
+            if find(kind.get(&cfg)).is_none() {
+                anyhow::bail!("白名单里没有找到 {which}（用 postbox {cmd} list 看编号）");
+            }
+            let left = {
+                let updated = store::update_config(root, |c| {
+                    if let Some(i) = find(kind.get(c)) {
+                        kind.remove(c, i);
+                    }
+                    Ok(())
+                })?;
+                kind.get(&updated).len()
+            };
+            println!("已收回。现在还剩 {left} 个目录。");
+            if left == 0 {
+                println!(
+                    "目录清空后手机端就没有{label}入口了。",
+                    label = kind.label()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -308,7 +477,7 @@ async fn main() -> Result<()> {
             if !note.is_empty() {
                 msg = format!("{page}\n{note}");
             }
-            notify::push(&cfg, &format!("已发布: {}", meta.title), &msg);
+            notify::push(&cfg, &root, &format!("已发布: {}", meta.title), &msg);
         }
         Cmd::Inbox { n } => {
             let list = store::list_feedback(&root, n);
@@ -339,6 +508,7 @@ async fn main() -> Result<()> {
                     "access_key" => cfg.access_key.clone(),
                     "upload_dirs" => cfg.upload_dirs.join(", "),
                     "upload_max_mb" => cfg.upload_max_mb.to_string(),
+                    "share_dirs" => cfg.share_dirs.join(", "),
                     _ => bail!("未知配置项: {key}"),
                 };
                 println!("{v}");
@@ -360,6 +530,7 @@ async fn main() -> Result<()> {
             println!("向 {}/{} 发送测试推送…", cfg.ntfy_server, cfg.ntfy_topic);
             notify::push(
                 &cfg,
+                &root,
                 "postbox 测试",
                 "如果你在手机看到这条，说明推送链路已打通",
             );
@@ -434,84 +605,24 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Cmd::Upload { action } => {
-            let cfg = store::load_config(&root)?;
-            let base = cfg
-                .base_url
-                .clone()
-                .unwrap_or_else(|| format!("http://127.0.0.1:{}", cfg.port));
+        Cmd::Upload { action } => whitelist(
+            &root,
             match action {
-                UploadAction::Add { path } => {
-                    let abs = store::validate_upload_dir(&path)?;
-                    if cfg.upload_dirs.iter().any(|d| d == &abs) {
-                        println!("已经在白名单里: {abs}");
-                    } else {
-                        if cfg.upload_dirs.len() >= store::MAX_UPLOAD_DIRS {
-                            anyhow::bail!(
-                                "最多开放 {} 个目录，先用 postbox upload rm <编号> 收一个",
-                                store::MAX_UPLOAD_DIRS
-                            );
-                        }
-                        store::update_config(&root, |c| {
-                            c.upload_dirs.push(abs.clone());
-                            Ok(())
-                        })?;
-                        println!("已开放: {abs}");
-                        println!(
-                            "上传页: {base}/upload?key={}（服务在跑的话立刻生效，不用重启）",
-                            cfg.access_key
-                        );
-                    }
-                }
-                UploadAction::List => {
-                    if cfg.upload_dirs.is_empty() {
-                        println!(
-                            "还没有开放任何目录，手机端上传等于没开。\n\
-                             开放一个: postbox upload add D:\\手机传上来"
-                        );
-                    }
-                    for (i, d) in cfg.upload_dirs.iter().enumerate() {
-                        let p = std::path::PathBuf::from(d);
-                        let note = if !p.is_dir() {
-                            "  ← 这个目录现在不存在，手机选它会报错"
-                        } else if store::is_system_volume(&p) {
-                            "  ← 在系统盘上，建议收回"
-                        } else {
-                            ""
-                        };
-                        println!("[{i}] {d}{note}");
-                    }
-                }
-                UploadAction::Rm { which } => {
-                    let idx: Option<usize> = which.parse().ok();
-                    let find = |dirs: &[String]| -> Option<usize> {
-                        if let Some(i) = idx {
-                            return if i < dirs.len() { Some(i) } else { None };
-                        }
-                        let want = which.trim_end_matches(['/', '\\']);
-                        dirs.iter().position(|d| {
-                            let d = d.trim_end_matches(['/', '\\']);
-                            d.eq_ignore_ascii_case(want)
-                        })
-                    };
-                    if find(&cfg.upload_dirs).is_none() {
-                        anyhow::bail!("白名单里没有找到 {which}（用 postbox upload list 看编号）");
-                    }
-                    let removed = store::update_config(&root, |c| {
-                        if let Some(i) = find(&c.upload_dirs) {
-                            c.upload_dirs.remove(i);
-                        }
-                        Ok(())
-                    })?
-                    .upload_dirs
-                    .clone();
-                    println!("已收回。现在还剩 {} 个目录。", removed.len());
-                    if removed.is_empty() {
-                        println!("目录清空后手机端就没有上传入口了。");
-                    }
-                }
-            }
-        }
+                UploadAction::Add { path } => Wl::Add(path),
+                UploadAction::List => Wl::List,
+                UploadAction::Rm { which } => Wl::Rm(which),
+            },
+            WlKind::Upload,
+        )?,
+        Cmd::Share { action } => whitelist(
+            &root,
+            match action {
+                ShareAction::Add { path } => Wl::Add(path),
+                ShareAction::List => Wl::List,
+                ShareAction::Rm { which } => Wl::Rm(which),
+            },
+            WlKind::Share,
+        )?,
         Cmd::Uploads { n } => {
             let list = store::list_uploads(&root, n);
             if list.is_empty() {
@@ -527,6 +638,15 @@ async fn main() -> Result<()> {
                     store::human_size(u.size),
                     if u.ip.is_empty() { "?" } else { &u.ip }
                 );
+            }
+        }
+        Cmd::Logs { n } => {
+            let lines = store::read_events(&root, n);
+            if lines.is_empty() {
+                println!("暂无事件记录（服务侧事件是从这个版本才开始记的，之前的历史查不回来）");
+            }
+            for l in lines {
+                println!("{l}");
             }
         }
         Cmd::Mcp => {
@@ -616,6 +736,7 @@ mod config_tests {
             cloudflared: "tools/cloudflared.exe".into(),
             bind: "0.0.0.0".into(),
             upload_dirs: vec![],
+            share_dirs: vec![],
             upload_max_mb: 100,
         }
     }

@@ -160,8 +160,10 @@ fn supervise_once(
             }) {
                 Ok(c) => {
                     println!("隧道就绪: {url}");
+                    store::log_event(root, &format!("隧道就绪: {url}"));
                     notify::push(
                         &c,
+                        root,
                         "postbox 新地址",
                         &format!(
                             "隧道已就绪：\n{url}/?key={}\n(地址变化时会自动再推一次)",
@@ -169,7 +171,10 @@ fn supervise_once(
                         ),
                     );
                 }
-                Err(e) => eprintln!("写入 base_url 失败: {e}"),
+                Err(e) => {
+                    eprintln!("写入 base_url 失败: {e}");
+                    store::log_event(root, &format!("写入 base_url 失败: {e}"));
+                }
             }
         }
     }
