@@ -6,6 +6,20 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Uploads gave up on a slow tunnel instead of working around it.** The client sent anything
+  under 48 MB as one request, a threshold picked when this machine measured 1.5 MB/s on the
+  quick tunnel. The next day it managed 10–17 KB/s: a 3 MB photo died at 133 s with Cloudflare's
+  524 while the phone's progress bar sat at 100% — that bar counts bytes handed to the operating
+  system, not bytes the PC received, so "full but nothing arrived" was the honest reading of a
+  request the tunnel had already dropped. Anything over 512 KB now goes through the chunk path in
+  512 KB pieces, each its own request that finishes in tens of seconds, and a piece that doesn't
+  arrive resumes from the offset the PC reports. Same tunnel, same day, right after the change:
+  1.43 MB in 3 pieces, 69 s, byte-identical on disk.
+- A half-finished upload left its `.part` in the folder the user chose for up to a day before the
+  sweep removed it. It is 30 minutes now, which is longer than any piece takes.
+
 ## [0.4.0] — 2026-10-10
 
 The phone now works directly on the folders the PC opens: look inside, pull files out,

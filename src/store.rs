@@ -646,7 +646,7 @@ fn is_our_part(name: &str) -> bool {
 }
 
 /// 上传中断（进程被杀、隧道掉线）会在用户选的目录里留下 `.part`。那些地方不在 `data/`
-/// 下，例行清理原本扫不到，所以按白名单扫一遍，只认上面那个形状、且超过一天的。
+/// 下，例行清理原本扫不到，所以按白名单扫一遍，只认上面那个形状、且半小时没动过的。
 fn sweep_upload_parts(dirs: &[String]) {
     for d in dirs {
         let base = Path::new(d);
@@ -676,13 +676,17 @@ fn sweep_upload_parts(dirs: &[String]) {
     }
 }
 
-/// 最后修改时间超过一天，就算不上「正在进行中」了
+/// 半截上传留下的 `.part` 多久算废。隧道慢的时候一次上传会拖很久，但一旦真的断了，
+/// 那个文件在用户自己挑的目录里就是看得见的垃圾 —— 等一天太久，半小时足够判定它不再有人写。
+const PART_MAX_AGE_MS: i64 = 30 * 60 * 1000;
+
+/// 最后修改时间超过半小时，就算不上「正在进行中」了
 fn stale(path: &Path) -> bool {
     path.metadata()
         .and_then(|m| m.modified())
         .map(|t| {
             t.elapsed()
-                .map(|d| d.as_millis() as i64 > TMP_MAX_AGE_MS)
+                .map(|d| d.as_millis() as i64 > PART_MAX_AGE_MS)
                 .unwrap_or(false)
         })
         .unwrap_or(false)

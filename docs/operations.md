@@ -54,7 +54,7 @@ Tick these off on a real phone:
 - [ ] Uploading the same name twice produces `名字 (1).ext` — nothing on the PC gets overwritten
 - [ ] `postbox upload add C:\anything` is refused with a sentence that says why; so is a folder that does not exist yet
 - [ ] Without the access key the upload page answers 401 and `POST /api/upload` answers 401
-- [ ] A file over 48 MB arrives as several chunks and reassembles byte-for-byte; interrupting one chunk resumes from the `received` offset the PC reports, not from zero
+- [ ] A file over 512 KB arrives as several 512 KB chunks and reassembles byte-for-byte; interrupting one chunk resumes from the `received` offset the PC reports, not from zero
 - [ ] Submitting feedback from the phone page works (it needs `connect-src 'self'` in the CSP; without it the button silently does nothing)
 - [ ] After rebooting the machine, the phone receives a "new address" push within ~30 seconds and the new hostname opens; **links minted before the reboot are dead**, by design
 - [ ] Expired bundles (30 days by default) disappear on their own — their page turns into "链接不存在或已过期"
@@ -126,7 +126,7 @@ ntfy needs an account. Deleting the directory is the whole uninstall.
 | Word preview shows an empty box | legacy `.doc` is not supported; documents over 20 MB are not previewed | download and open in Office/WPS |
 | The phone's 提交反馈 button does nothing | the page's CSP needs `connect-src 'self'`; check the header with `curl -sD -` | rebuild from current `master` — 0.2.0 shipped without it |
 | Upload page lists no folders | `upload_dirs` is empty | `postbox upload add D:\某个目录` |
-| Upload dies near 150–170 s with a 502/524 from Cloudflare | the tunnel's request timeout, not `upload_max_mb`. Files over 48 MB are chunked precisely to dodge this, so a whole-file failure means the chunk path is not being used | check `postbox --version` against current `master`; use the LAN / Tailscale for very big files |
+| Upload dies near 100–170 s with a 502/524 from Cloudflare | the tunnel's request timeout, not `upload_max_mb`. Tunnel throughput itself swings by orders of magnitude (1.5 MB/s and 10 KB/s have both been measured on this machine), so first check how fast a single 200 KB request goes; files over 512 KB are chunked precisely to dodge the timeout, so a whole-file failure means the phone is running an older page — reload it | use the LAN / Tailscale for very big files, and `postbox share add` so the phone can pull things back out |
 | Upload says the folder does not exist | someone renamed or deleted it on the PC | `postbox upload list` flags it; re-add or remove the entry |
 | Shared folder answers 401 | `/s`, `/sf`, `/sd`, `/sh`, `/sm` all need the key, and the browser must have it as a cookie or in the URL | open `/?key=…` once, or add `?key=…` to the link |
 | A file you expected in a shared listing is missing | its name starts with a dot, or the listing passed 500 entries | by design; rename it or browse deeper |

@@ -1860,7 +1860,7 @@ fn upload_form_html(cfg: &Config) -> String {
     format!(
         r#"<header class=top><a class=back href="/">← 全部文件</a><span class=badge>手机 → 电脑</span></header>
 <div class=card><h1>传到电脑上</h1>
-<p class=hint>选目录、选文件，然后点上传。单个文件 {cap} 以内。超过 48 MB 会自动切成片一段一段传，某一段断了只重传那一段 —— 免费隧道大约 150 秒就会掐断一个请求，切片就是为绕开它。还在同一个 Wi-Fi 上的话，直连电脑快得多。</p>
+<p class=hint>选目录、选文件，然后点上传。单个文件 {cap} 以内。超过 512 KB 会自动切成小片一片一片传，哪一片没到就重传那一片 —— 免费隧道大约 100~170 秒就会掐断一个请求，切片就是为了绕开它。隧道慢的时候大文件确实要等，同一个 Wi-Fi 下直连电脑快得多。</p>
 <h3 class=sub>存到哪个目录</h3>{dirs}
 <h3 class=sub>再放进哪个小文件夹（可选）</h3>
 <input id=sub value="{today}" style="width:100%;padding:10px;border:1px solid var(--line);border-radius:8px;font:inherit">
@@ -1880,7 +1880,9 @@ fn upload_form_html(cfg: &Config) -> String {
 
 const UPLOAD_JS: &str = r#"
 const MAXB=__MAXB__*1048576;
-const CHUNK=48*1048576;
+// 一片 512 KB：免费隧道的上行能掉到 10 KB/s 级，而一个请求大约 100~170 秒就被掐。
+// 一片要在几十秒内发完才谈得上「断了只重传那一片」，48 MB 一片在这种速度下等于必挂。
+const CHUNK=512*1024;
 function fmt(n){if(n<1024)return n+' B';if(n<1048576)return (n/1024).toFixed(1)+' KB';return (n/1048576).toFixed(1)+' MB'}
 function esc(s){return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
 function picked(){return [...document.getElementById('f').files,...document.getElementById('c').files]}
@@ -1919,7 +1921,7 @@ async function go(){
   }
   toast('完成：成功 '+ok+' 个'+(bad?('，失败 '+bad+' 个'):''));
 }
-// 小文件一发完事；大文件切片逐发，服务器每片都回它实际收到哪了，断了从那片重发
+// 512 KB 以内一发完事；再大的切成片逐发，服务器每片都回它实际收到哪了，断了从那片重发
 async function sendFile(fl,dir,sub,bar){
   if(fl.size<=CHUNK){
     const u='/api/upload?d='+encodeURIComponent(dir)+'&sub='+encodeURIComponent(sub)+'&n='+encodeURIComponent(fl.name)+keyq();
